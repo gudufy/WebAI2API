@@ -724,6 +724,18 @@ export class ToolCallParser {
         return this.parseToolCalls(responseContent, tools);
     }
 
+    /**
+     * Remove protocol-only DSML tags left outside extracted tool-call spans.
+     * Tool-enabled streams are buffered until parsing finishes, so cleanup happens
+     * before any response text is exposed to the client.
+     */
+    static stripProtocolMarkup(value: string): string {
+        return value
+            .replace(/<\s*\/?\s*(?:｜{1,2}DSML｜{1,2}|DSML｜{1,2}|｜DSML｜)(?:\s+(?:calls|invoke|parameter)\b[^>]*)?\s*>/g, '')
+            .replace(/<\s*\/?\s*DSML(?:｜{1,2})?\s*>/g, '')
+            .trim();
+    }
+
     static shortCallParamLen = 200;
     static buildCallId(toolName: string, parameters: string): string {
         if (parameters.length > this.shortCallParamLen + 3) {
