@@ -364,6 +364,11 @@ export class WebSocketSessionManager {
                         ),
                         stopChat: messageId => this.client.stopChat({ sessionId: runResult.sessionId, messageId }),
                     },
+                    effectiveInput.tools?.map(tool => ({
+                        name: tool.name,
+                        description: tool.description,
+                        parameters: tool.parameters,
+                    })),
                 );
                 rememberResponseSessionMessageId(runResult.sessionId, parsed.messageId);
                 this.lastInstructionMessageId = parsed.messageId ?? -114514;
