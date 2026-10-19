@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { parseArgs } from "node:util";
-import { ChatGPTResponsesClient, normalizeChatGPTCredentials, type ChatGPTResponseRequest } from "./chatgptResponsesClient.js";
+import { ChatGPTResponsesClient, normalizeChatGPTCredentials, type ChatGPTResponseRequest, type ChatGPTWebSocketMetadata } from "./chatgptResponsesClient.js";
 import { collectResponse, forwardSseStream } from "./chatgptResponseStream.js";
 import { errorResponse, getAllowedIpSummary, isAllowlistedClient, readRequestJson, sendJson, sendSseData, sendSseDone, sendSseHeaders, corsHeaders } from "./server/httpUtils.js";
 import { isDirectRun } from "./utils.js";
@@ -37,6 +37,43 @@ function describeRequest(raw: any): string {
     return `type=${type} model=${model} input=${inputCount} stream=${raw?.stream === true}`;
 }
 
+function headerValue(req: IncomingMessage, name: string): string | undefined {
+    const value = req.headers[name.toLowerCase()];
+    if (Array.isArray(value)) return value[0];
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function metadataFromUpgrade(req: IncomingMessage): ChatGPTWebSocketMetadata {
+    return {
+        sessionId: headerValue(req, "session-id"),
+        threadId: headerValue(req, "thread-id"),
+        windowId: headerValue(req, "x-codex-window-id"),
+        turnMetadata: headerValue(req, "x-codex-turn-metadata"),
+        version: headerValue(req, "version"),
+    };
+}
+
+function metadataFromResponseCreate(message: any, fallback: ChatGPTWebSocketMetadata): ChatGPTWebSocketMetadata {
+    const clientMetadata = message?.client_metadata;
+    if (!clientMetadata || typeof clientMetadata !== "object" || Array.isArray(clientMetadata)) return fallback;
+    const get = (...keys: string[]): string | undefined => {
+        for (const key of keys) {
+            const value = clientMetadata[key];
+            if (typeof value === "string" && value.trim()) return value.trim();
+        }
+        return undefined;
+    };
+    return {
+        ...fallback,
+        sessionId: get("session_id") || fallback.sessionId,
+        threadId: get("thread_id") || fallback.threadId,
+        turnId: get("turn_id") || fallback.turnId,
+        windowId: get("x-codex-window-id", "window_id") || fallback.windowId,
+        turnMetadata: get("x-codex-turn-metadata") || fallback.turnMetadata,
+        version: get("version") || fallback.version,
+    };
+}
+
 async function handleResponses(req: IncomingMessage, res: ServerResponse, client: ChatGPTResponsesClient) {
     try {
         const raw = await readRequestJson(req);
@@ -58,15 +95,19 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, client
     }
 }
 
-async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesClient) {
+async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesClient, request: IncomingMessage) {
+    const upgradeMetadata = metadataFromUpgrade(request);
+    let sessionMetadata: ChatGPTWebSocketMetadata = { ...upgradeMetadata };
     console.log("[Local WS] Codex WebSocket connected.");
+    console.log(`[Local WS] Upgrade metadata: session=${upgradeMetadata.sessionId ? "yes" : "no"} thread=${upgradeMetadata.threadId ? "yes" : "no"} window=${upgradeMetadata.windowId ? "yes" : "no"} turnMetadata=${upgradeMetadata.turnMetadata ? "yes" : "no"}`);
+
     let upstream: WebSocket | undefined;
     let connecting: Promise<WebSocket> | undefined;
 
     const getUpstream = async () => {
         if (upstream && upstream.readyState === 1) return upstream;
         if (!connecting) {
-            connecting = client.connectWebSocket().then(socket => {
+            connecting = client.connectWebSocket(sessionMetadata).then(socket => {
                 upstream = socket;
                 connecting = undefined;
                 socket.on("message", data => {
@@ -92,6 +133,10 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesCli
         try {
             const message = JSON.parse(text) as any;
             console.log(`[Local WS] <- ${message.type || "unknown"}${message.model ? ` model=${message.model}` : ""}`);
+            if (message.type === "response.create") {
+                sessionMetadata = metadataFromResponseCreate(message, sessionMetadata);
+                console.log(`[Local WS] Codex metadata: session=${sessionMetadata.sessionId ? "yes" : "no"} thread=${sessionMetadata.threadId ? "yes" : "no"} window=${sessionMetadata.windowId ? "yes" : "no"} turn=${sessionMetadata.turnId ? "yes" : "no"} turnMetadata=${sessionMetadata.turnMetadata ? "yes" : "no"}`);
+            }
             const socket = await getUpstream();
             if (socket.readyState !== 1) throw new Error(`Upstream WebSocket is not open (state=${socket.readyState}).`);
             const outgoing = message.type === "response.create" ? { ...message, model: normalizeModel(message.model) } : message;
@@ -136,7 +181,7 @@ async function main() {
         const url = new URL(req.url ?? "/", "http://127.0.0.1");
         console.log(`[HTTP] WebSocket upgrade ${url.pathname} from ${req.socket.remoteAddress || "unknown"}`);
         if (!isAllowlistedClient(req) || url.pathname !== "/v1/responses") { console.warn("[HTTP] WebSocket upgrade rejected."); socket.destroy(); return; }
-        wss.handleUpgrade(req, socket, head, ws => { void handleWebSocketSession(ws, client); });
+        wss.handleUpgrade(req, socket, head, ws => { void handleWebSocketSession(ws, client, req); });
     });
 
     const port = Number(parsed.values.port) || DEFAULT_PORT;
