@@ -153,6 +153,10 @@ export class ChatGPTBrowserClient {
         const body = new ReadableStream<Uint8Array>({
             start: controller => {
                 void this.runResponse(request, threadId, responseId, controller, signal).catch(error => {
+                    if (signal?.aborted) {
+                        controller.close();
+                        return;
+                    }
                     const message = error instanceof Error ? error.message : String(error);
                     controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "browser_error", message } })}\n\n`));
                     controller.close();
