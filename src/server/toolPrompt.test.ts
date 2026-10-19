@@ -60,7 +60,7 @@ test("parses multiple DSML invokes from a complete response", () => {
         '<｜｜DSML｜｜ parameter name="cmd" string="true">git status --short</｜｜DSML｜｜ parameter>',
         "</｜｜DSML｜｜ invoke>",
         "</｜｜DSML｜｜ calls>",
-    ].join("\\n");
+    ].join("\n");
 
     const calls = ToolCallParser.extractFromCompleteResponse(response, tools);
     assert.equal(calls.length, 2);
