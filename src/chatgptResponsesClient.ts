@@ -69,12 +69,12 @@ export class ChatGPTResponsesClient {
 
     private headers(): Record<string, string> {
         const headers: Record<string, string> = {
-            "Authorization": `Bearer ${this.credentials.accessToken}`,
+            Authorization: `Bearer ${this.credentials.accessToken}`,
             "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "originator": "codex_cli_rs",
+            Accept: "text/event-stream",
+            Originator: "codex_cli_rs",
             "OpenAI-Beta": "responses_websockets=2026-02-06",
-            "User-Agent": this.credentials.userAgent || "WebAI2API/ChatGPT",
+            User-Agent: this.credentials.userAgent || "WebAI2API/ChatGPT",
             "x-client-request-id": createRequestId(),
         };
         if (this.credentials.accountId) headers["ChatGPT-Account-Id"] = this.credentials.accountId;
@@ -90,8 +90,7 @@ export class ChatGPTResponsesClient {
         const threadId = metadata.threadId || crypto.randomUUID();
         const windowId = metadata.windowId || crypto.randomUUID();
 
-        headers["Originator"] = "codex_cli_rs";
-        headers["Version"] = metadata.version || process.env.CHATGPT_CODEX_VERSION || "0.148.0";
+        headers.Version = metadata.version || process.env.CHATGPT_CODEX_VERSION || "0.148.0";
         headers.session_id = sessionId;
         headers["session-id"] = sessionId;
         headers.thread_id = threadId;
@@ -127,17 +126,21 @@ export class ChatGPTResponsesClient {
         const wsUrl = `${this.baseUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}/responses`;
         const headers = this.websocketHeaders(metadata);
         console.log(`[ChatGPT] Connecting upstream WebSocket: ${wsUrl}`);
-        console.log(`[ChatGPT] Handshake metadata: session=yes thread=yes window=yes version=${headers.Version}`);
+        console.log(`[ChatGPT] Handshake metadata: session=${metadata.sessionId ? "yes" : "generated"} thread=${metadata.threadId ? "yes" : "generated"} window=${metadata.windowId ? "yes" : "generated"} version=${headers.Version}`);
         return await new Promise<WebSocket>((resolve, reject) => {
             const ws = new WebSocket(wsUrl, { headers });
             let settled = false;
             const cleanupAbort = () => signal?.removeEventListener("abort", onAbort);
-            const onAbort = () => {
+            const fail = (error: Error) => {
                 if (settled) return;
                 settled = true;
-                ws.close();
                 cleanupAbort();
-                reject(new Error("ChatGPT WebSocket connection aborted."));
+                reject(error);
+            };
+            const onAbort = () => {
+                if (settled) return;
+                ws.close();
+                fail(new Error("ChatGPT WebSocket connection aborted."));
             };
             signal?.addEventListener("abort", onAbort, { once: true });
             ws.once("open", () => {
@@ -148,24 +151,21 @@ export class ChatGPTResponsesClient {
                 resolve(ws);
             });
             ws.once("unexpected-response", (_request, response) => {
-                if (settled) return;
-                settled = true;
-                cleanupAbort();
                 let body = "";
                 response.on("data", chunk => { body += String(chunk); });
                 response.on("end", () => {
                     const detail = body.trim().replace(/\s+/g, " ").slice(0, 1000);
-                    reject(new Error(`ChatGPT WebSocket handshake failed: HTTP ${response.statusCode}${detail ? ` ${detail}` : ""}`));
+                    fail(new Error(`ChatGPT WebSocket handshake failed: HTTP ${response.statusCode}${detail ? ` ${detail}` : ""}`));
                 });
             });
-            ws.once("error", error => {
-                if (settled) return;
-                settled = true;
-                cleanupAbort();
-                reject(error);
-            });
+            ws.once("error", error => fail(error));
             ws.once("close", (code, reason) => {
-                if (settled) console.log(`[ChatGPT] Upstream WebSocket closed: ${code} ${reason.toString()}`);
+                const detail = reason.toString();
+                if (!settled) {
+                    fail(new Error(`ChatGPT WebSocket closed before open: code=${code}${detail ? ` reason=${detail}` : ""}`));
+                    return;
+                }
+                console.log(`[ChatGPT] Upstream WebSocket closed: ${code} ${detail}`);
             });
         });
     }
