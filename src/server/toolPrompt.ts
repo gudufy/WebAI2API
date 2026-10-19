@@ -15,6 +15,62 @@ export interface ToolDescription {
     parameters?: Record<string, unknown>;
 }
 
+/**
+ * 验证模型生成的工具参数是否符合调用方提供的 JSON Schema。
+ * 只校验常用的 JSON Schema 约束；不做类型强转，避免把损坏的命令参数“修正”后执行。
+ */
+export function validateToolCallArguments(
+    toolName: string,
+    argumentsJson: string,
+    tools?: ToolDescription[],
+): boolean {
+    if (!tools?.length) return true;
+    const tool = tools.find(item => item.name === toolName);
+    if (!tool) return false;
+
+    let value: unknown;
+    try {
+        value = JSON.parse(argumentsJson);
+    } catch {
+        return false;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+
+    const schema = tool.parameters;
+    if (!schema || typeof schema !== 'object') return true;
+
+    const check = (input: unknown, rule: Record<string, unknown>): boolean => {
+        const type = rule.type;
+        if (typeof type === 'string') {
+            const matchesType =
+                type === 'object' ? !!input && typeof input === 'object' && !Array.isArray(input) :
+                type === 'array' ? Array.isArray(input) :
+                type === 'string' ? typeof input === 'string' :
+                type === 'number' ? typeof input === 'number' && Number.isFinite(input) :
+                type === 'integer' ? typeof input === 'number' && Number.isInteger(input) :
+                type === 'boolean' ? typeof input === 'boolean' :
+                type === 'null' ? input === null : true;
+            if (!matchesType) return false;
+        }
+        if (Array.isArray(rule.enum) && !rule.enum.some(item => JSON.stringify(item) === JSON.stringify(input))) return false;
+        if (rule.type === 'object' && input && typeof input === 'object' && !Array.isArray(input)) {
+            const objectValue = input as Record<string, unknown>;
+            const properties = rule.properties && typeof rule.properties === 'object' ? rule.properties as Record<string, unknown> : {};
+            if (Array.isArray(rule.required) && rule.required.some(key => typeof key !== 'string' || !Object.prototype.hasOwnProperty.call(objectValue, key))) return false;
+            if (rule.additionalProperties === false && Object.keys(objectValue).some(key => !Object.prototype.hasOwnProperty.call(properties, key))) return false;
+            for (const [key, propertySchema] of Object.entries(properties)) {
+                if (Object.prototype.hasOwnProperty.call(objectValue, key) && propertySchema && typeof propertySchema === 'object'
+                    && !check(objectValue[key], propertySchema as Record<string, unknown>)) return false;
+            }
+        }
+        if (rule.type === 'array' && Array.isArray(input) && rule.items && typeof rule.items === 'object') {
+            if (!input.every(item => check(item, rule.items as Record<string, unknown>))) return false;
+        }
+        return true;
+    };
+    return check(value, schema);
+}
+
 export function autoToolChoice(tools?: Array<any>): ToolChoice {
     if (!tools || tools.length === 0) return 'none';
     return 'auto';
@@ -465,7 +521,7 @@ export class ToolCallParser {
     // 一次性解析完整响应中的所有工具调用。
     // 这里是非流式解析入口：调用方必须先拿到 DeepSeek 的完整 RESPONSE 文本，
     // 再一次性提取工具调用，避免模型中途输出任何 wrapper 都影响 Codex 生命周期。
-    static parseToolCalls(responseContent: string): parsedToolCall[] {
+    static parseToolCalls(responseContent: string, tools?: ToolDescription[]): parsedToolCall[] {
         const results: parsedToolCall[] = [];
 
         // 这里故意只对“完整 RESPONSE”做解析，不依赖流式状态。
@@ -658,12 +714,14 @@ export class ToolCallParser {
             const key = `${item.start}\0${item.tool}\0${item.parameters}`;
             if (!unique.has(key)) unique.set(key, item);
         }
-        return [...unique.values()].sort((a, b) => a.start - b.start);
+        return [...unique.values()]
+            .filter(item => validateToolCallArguments(item.tool, item.parameters, tools))
+            .sort((a, b) => a.start - b.start);
     }
 
     /** 从完整 RESPONSE 文本提取工具调用。 */
-    static extractFromCompleteResponse(responseContent: string): parsedToolCall[] {
-        return this.parseToolCalls(responseContent);
+    static extractFromCompleteResponse(responseContent: string, tools?: ToolDescription[]): parsedToolCall[] {
+        return this.parseToolCalls(responseContent, tools);
     }
 
     static shortCallParamLen = 200;
