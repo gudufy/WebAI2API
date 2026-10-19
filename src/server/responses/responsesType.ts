@@ -205,12 +205,18 @@ export function normalizeResponsesRequest(
         parameters: tool.parameters,
     } as ToolDescription));
     const cachedToolFingerprint = sessionId ? responseSessionToolFingerprints.get(sessionId) : undefined;
-    const toolFingerprint = getToolFingerprint(x.tool_choice, toolDescriptions);
-    // Codex 的后续请求有时不会重复携带 tools。只要当前 DeepSeek session 已经注入过工具定义，
-    // 就继续复用会话上下文，不要重新塞几十 KB 的工具 prompt。
-    const toolPromptAlreadySent = !!sessionId && !!cachedToolFingerprint
-        && (x.tools === undefined || cachedToolFingerprint === toolFingerprint);
-    const toolprompt = toolPromptAlreadySent ? '' : buildToolPrompt(x.tool_choice, toolDescriptions);
+    const cachedToolConfig = sessionId ? responseSessionToolConfigs.get(sessionId) : undefined;
+    // Codex 后续请求可能省略 tools；这种情况下复用本会话缓存的工具定义。
+    // 但每一轮都必须重新注入工具协议，不能假设 DeepSeek 网页端会始终记住上一轮的格式要求。
+    const effectiveTools = x.tools === undefined && cachedToolConfig
+        ? cachedToolConfig.tools
+        : toolDescriptions;
+    const effectiveToolChoice = x.tools === undefined && cachedToolConfig
+        ? cachedToolConfig.toolChoice
+        : x.tool_choice;
+    const toolFingerprint = getToolFingerprint(effectiveToolChoice, effectiveTools);
+    // 保留指纹缓存用于会话工具配置管理，但不再用它跳过每轮的格式提示词。
+    const toolprompt = buildToolPrompt(effectiveToolChoice, effectiveTools);
     const instructions = x.instructions ? `[system]:\n${x.instructions}` : '';
     const textMessages = messageFromInputItem(x.input, toolprompt.length < 10 && !instructions);
     return {
