@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateToolCallArguments, type ToolDescription } from "./toolPrompt.js";
+import { ToolCallParser, validateToolCallArguments, type ToolDescription } from "./toolPrompt.js";
 
 const tools: ToolDescription[] = [{
     name: "exec_command",
@@ -46,4 +46,29 @@ test("rejects undeclared tools and additional properties", () => {
 test("rejects malformed JSON and non-object arguments", () => {
     assert.equal(validateToolCallArguments("exec_command", "{", tools), false);
     assert.equal(validateToolCallArguments("exec_command", "[]", tools), false);
+});
+
+
+test("parses multiple DSML invokes from a complete response", () => {
+    const response = [
+        "Checking the repository.",
+        "<｜｜DSML｜｜ calls>",
+        '<｜｜DSML｜｜ invoke name="exec_command">',
+        '<｜｜DSML｜｜ parameter name="cmd" string="true">pwd</｜｜DSML｜｜ parameter>',
+        "</｜｜DSML｜｜ invoke>",
+        '<｜｜DSML｜｜ invoke name="exec_command">',
+        '<｜｜DSML｜｜ parameter name="cmd" string="true">git status --short</｜｜DSML｜｜ parameter>',
+        "</｜｜DSML｜｜ invoke>",
+        "</｜｜DSML｜｜ calls>",
+    ].join("\\n");
+
+    const calls = ToolCallParser.extractFromCompleteResponse(response, tools);
+    assert.equal(calls.length, 2);
+    assert.equal(JSON.parse(calls[0].parameters).cmd, "pwd");
+    assert.equal(JSON.parse(calls[1].parameters).cmd, "git status --short");
+
+    const outsideCalls = response.slice(0, calls[0].start)
+        + response.slice(calls[0].start + calls[0].raw.length, calls[1].start)
+        + response.slice(calls[1].start + calls[1].raw.length);
+    assert.equal(ToolCallParser.stripProtocolMarkup(outsideCalls).includes("DSML"), false);
 });
