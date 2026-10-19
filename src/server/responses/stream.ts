@@ -313,7 +313,7 @@ function streamSendMessageContent(sender: (data: any) => void, content: Response
 
 // 流式解析
 import { DeepseekStreamParser, readDeepseekStream, toNumberOrNull, type StreamReadOptions } from "../../deepseekStreamParser.js";
-import { ToolCallDelta, ToolCallParser } from "../toolPrompt.js";
+import { ToolCallDelta, ToolCallParser, type ToolDescription, validateToolCallArguments } from "../toolPrompt.js";
 import { buildResponseId } from "../responseId.js";
 
 class StreamResponseBuilder {
@@ -564,6 +564,7 @@ export async function streamEventsFromStream(
     inputLength: number,
     send: (data: any) => void,
     options: StreamReadOptions = {},
+    toolSchemas?: ToolDescription[],
 ) {
     const toolParser = useTool ? new ToolCallParser() : null;
     const streamBuilder = new StreamResponseBuilder(send);
@@ -623,7 +624,7 @@ export async function streamEventsFromStream(
 
     if (toolParser) {
         for (const ev of toolParser.finishAll()) parseToolEvent(ev);
-        for (const call of ToolCallParser.extractFromCompleteResponse(completeResponse)) {
+        for (const call of ToolCallParser.extractFromCompleteResponse(completeResponse, toolSchemas)) {
             addToolCall(call.tool, call.parameters);
         }
     }
