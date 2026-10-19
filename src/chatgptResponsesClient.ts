@@ -74,7 +74,7 @@ export class ChatGPTResponsesClient {
             Accept: "text/event-stream",
             Originator: "codex_cli_rs",
             "OpenAI-Beta": "responses_websockets=2026-02-06",
-            User-Agent: this.credentials.userAgent || "WebAI2API/ChatGPT",
+            "User-Agent": this.credentials.userAgent || "WebAI2API/ChatGPT",
             "x-client-request-id": createRequestId(),
         };
         if (this.credentials.accountId) headers["ChatGPT-Account-Id"] = this.credentials.accountId;
@@ -165,7 +165,7 @@ export class ChatGPTResponsesClient {
                     fail(new Error(`ChatGPT WebSocket closed before open: code=${code}${detail ? ` reason=${detail}` : ""}`));
                     return;
                 }
-                console.log(`[ChatGPT] Upstream WebSocket closed: ${code} ${detail}`);
+                console.log(`[ChatGPT] Upstream WebSocket closed: ${code}${detail ? ` reason=${detail}` : ""}`);
             });
         });
     }
