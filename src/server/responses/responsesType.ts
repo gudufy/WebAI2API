@@ -145,6 +145,7 @@ export function asResponsesCreateRequest(req: any): ResponsesCreateRequest {
 // Codex 每次请求都会重复携带 tools，但 DeepSeek 网页会话已经保留了上一轮上下文。
 // 只缓存工具签名，不缓存完整 prompt，避免长期占用几十 KB 的字符串。
 const responseSessionToolFingerprints = new Map<string, string>();
+const responseSessionToolConfigs = new Map<string, { toolChoice: ToolChoice; tools: ToolDescription[] }>();
 const MAX_RESPONSE_SESSION_TOOL_CACHE = 256;
 
 function getToolFingerprint(toolChoice: ToolChoice, tools?: ToolDescription[]): string {
@@ -159,15 +160,32 @@ export function rememberResponseSessionTools(
     if (!sessionId || sessionId.startsWith(READY_RESPONSE_ID)) return;
     responseSessionToolFingerprints.delete(sessionId);
     responseSessionToolFingerprints.set(sessionId, getToolFingerprint(toolChoice, tools));
+    responseSessionToolConfigs.delete(sessionId);
+    responseSessionToolConfigs.set(sessionId, {
+        toolChoice,
+        tools: (tools ?? []).map(tool => ({ ...tool })),
+    });
     while (responseSessionToolFingerprints.size > MAX_RESPONSE_SESSION_TOOL_CACHE) {
         const oldest = responseSessionToolFingerprints.keys().next().value;
         if (!oldest) break;
         responseSessionToolFingerprints.delete(oldest);
+        responseSessionToolConfigs.delete(oldest);
     }
 }
 
+export function getResponseSessionToolConfig(
+    sessionId: string | null | undefined,
+): { toolChoice: ToolChoice; tools: ToolDescription[] } | undefined {
+    if (!sessionId) return undefined;
+    const config = responseSessionToolConfigs.get(sessionId);
+    return config ? { toolChoice: config.toolChoice, tools: config.tools.map(tool => ({ ...tool })) } : undefined;
+}
+
 export function clearResponseSessionTools(sessionId: string | null | undefined): void {
-    if (sessionId) responseSessionToolFingerprints.delete(sessionId);
+    if (sessionId) {
+        responseSessionToolFingerprints.delete(sessionId);
+        responseSessionToolConfigs.delete(sessionId);
+    }
 }
 
 export function normalizeResponsesRequest(
