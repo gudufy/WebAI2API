@@ -140,6 +140,12 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesCli
             const message = JSON.parse(text) as any;
             console.log(`[Local WS] <- ${message.type || "unknown"}${message.model ? ` model=${message.model}` : ""}`);
             if (message.type === "response.create") {
+                const keysOf = (value: unknown): string => value && typeof value === "object" && !Array.isArray(value)
+                    ? Object.keys(value as Record<string, unknown>).join(",")
+                    : "<none>";
+                console.log(
+                    `[Local WS] response.create metadata keys: client_metadata=[${keysOf(message.client_metadata)}] metadata=[${keysOf(message.metadata)}] top=[${keysOf(message)}]`
+                );
                 sessionMetadata = metadataFromResponseCreate(message, sessionMetadata);
                 console.log(`[Local WS] Codex metadata: session=${sessionMetadata.sessionId ? "yes" : "no"} thread=${sessionMetadata.threadId ? "yes" : "no"} window=${sessionMetadata.windowId ? "yes" : "no"} turn=${sessionMetadata.turnId ? "yes" : "no"} turnMetadata=${sessionMetadata.turnMetadata ? "yes" : "no"}`);
             }
