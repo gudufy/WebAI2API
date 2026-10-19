@@ -313,7 +313,7 @@ function streamSendMessageContent(sender: (data: any) => void, content: Response
 
 // 流式解析
 import { DeepseekStreamParser, readDeepseekStream, toNumberOrNull, type StreamReadOptions } from "../../deepseekStreamParser.js";
-import { ToolCallDelta, ToolCallParser, type ToolDescription, validateToolCallArguments } from "../toolPrompt.js";
+import { ToolCallParser, type ToolDescription, validateToolCallArguments } from "../toolPrompt.js";
 import { buildResponseId } from "../responseId.js";
 
 class StreamResponseBuilder {
@@ -566,32 +566,10 @@ export async function streamEventsFromStream(
     options: StreamReadOptions = {},
     toolSchemas?: ToolDescription[],
 ) {
-    const toolParser = useTool ? new ToolCallParser() : null;
     const streamBuilder = new StreamResponseBuilder(send);
     let initialized = false;
     let completeResponse = '';
     let completeThinking = '';
-    const pendingToolCalls: Array<{ name: string; parameters: string }> = [];
-
-    function addToolCall(name: string, parameters: string) {
-        if (!name || !parameters) return;
-        const key = `${name}\0${parameters}`;
-        if (pendingToolCalls.some(x => `${x.name}\0${x.parameters}` === key)) return;
-        pendingToolCalls.push({ name, parameters });
-    }
-
-    function parseToolEvent(ev: ToolCallDelta) {
-        switch (ev.type) {
-            case 'tool_call':
-                addToolCall(ev.data.name, ev.data.parameters);
-                break;
-            case 'text_delta':
-                streamBuilder.addTextDelta(ev.data);
-                break;
-            default:
-                break;
-        }
-    }
 
     const parser = new DeepseekStreamParser(
         (type, delta) => {
@@ -602,11 +580,9 @@ export async function streamEventsFromStream(
             }
             if (type === 'RESPONSE') {
                 completeResponse += delta;
-                if (toolParser) {
-                    for (const ev of toolParser.push(delta)) parseToolEvent(ev);
-                } else {
-                    streamBuilder.addTextDelta(delta);
-                }
+                // If tools are enabled, never send raw model chunks as text. A later
+                // full-response parse cannot retract DSML that has already leaked.
+                if (!useTool) streamBuilder.addTextDelta(delta);
             }
         },
         event => {
@@ -622,23 +598,33 @@ export async function streamEventsFromStream(
 
     await readDeepseekStream(stream, parser, options);
 
-    if (toolParser) {
-        for (const ev of toolParser.finishAll()) parseToolEvent(ev);
-        for (const call of ToolCallParser.extractFromCompleteResponse(completeResponse, toolSchemas)) {
-            addToolCall(call.tool, call.parameters);
-        }
-    }
+    if (useTool) {
+        // Parse once at EOF and emit text/function-call items in their original order.
+        // This deliberately trades token-by-token text for protocol correctness when
+        // tools are enabled; it prevents partial DSML tags from reaching Codex.
+        const calls = ToolCallParser.extractFromCompleteResponse(completeResponse, toolSchemas);
+        let cursor = 0;
+        const emitCleanText = (text: string) => {
+            const clean = ToolCallParser.stripProtocolMarkup(text);
+            if (clean) streamBuilder.addTextDelta(clean);
+        };
 
-    for (const call of pendingToolCalls) {
-        if (!validateToolCallArguments(call.name, call.parameters, toolSchemas)) continue;
-        streamBuilder.sendToolCall({
-            type: 'function_call',
-            name: call.name,
-            arguments: call.parameters,
-            id: '',
-            call_id: ToolCallParser.buildCallId(call.name, call.parameters),
-            status: 'completed',
-        });
+        for (const call of calls) {
+            if (call.start < cursor) continue;
+            emitCleanText(completeResponse.slice(cursor, call.start));
+            if (validateToolCallArguments(call.tool, call.parameters, toolSchemas)) {
+                streamBuilder.sendToolCall({
+                    type: 'function_call',
+                    name: call.tool,
+                    arguments: call.parameters,
+                    id: '',
+                    call_id: ToolCallParser.buildCallId(call.tool, call.parameters),
+                    status: 'completed',
+                });
+            }
+            cursor = call.start + call.raw.length;
+        }
+        emitCleanText(completeResponse.slice(cursor));
     }
 
     if (completeThinking.trim()) {
