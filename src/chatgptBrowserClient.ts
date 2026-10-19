@@ -169,7 +169,8 @@ export class ChatGPTBrowserClient {
         controller: ReadableStreamDefaultController<Uint8Array>,
         signal?: AbortSignal,
     ): Promise<void> {
-        const send = (event: ResponseEvent) => controller.enqueue(sse(event));
+        let sequenceNumber = 0;
+        const send = (event: ResponseEvent) => controller.enqueue(sse({ ...event, sequence_number: sequenceNumber++ }));
         const now = Math.floor(Date.now() / 1000);
         const outputItemId = id("msg");
         const outputTextId = id("part");
@@ -204,6 +205,10 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
         await sendButton.click();
 
         send({ type: "response.created", sequence_number: 0, response: { id: responseId, object: "response", created_at: now, status: "in_progress", model: request.model, output: [] } });
+        if (!tools.length) {
+            send({ type: "response.output_item.added", output_index: 0, item: { id: outputItemId, type: "message", role: "assistant", status: "in_progress", content: [] } });
+            send({ type: "response.content_part.added", item_id: outputItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+        }
 
         let previous = "";
         let stableSince = Date.now();
@@ -244,9 +249,11 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
                 id: outputItemId, type: "message", role: "assistant", status: "completed",
                 content: [{ type: "output_text", text: previous, annotations: [] }],
             };
-            send({ type: "response.output_item.added", sequence_number: 1, output_index: 0, item: { ...item, status: "in_progress", content: [] } });
-            send({ type: "response.content_part.added", sequence_number: 2, item_id: outputItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
-            if (tools.length && previous) send({ type: "response.output_text.delta", sequence_number: 3, item_id: outputItemId, output_index: 0, content_index: 0, delta: previous });
+            if (tools.length) {
+                send({ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } });
+                send({ type: "response.content_part.added", item_id: outputItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+                if (previous) send({ type: "response.output_text.delta", item_id: outputItemId, output_index: 0, content_index: 0, delta: previous });
+            }
             send({ type: "response.content_part.done", sequence_number: 4, item_id: outputItemId, output_index: 0, content_index: 0, part: item.content[0] });
             send({ type: "response.output_item.done", sequence_number: 5, output_index: 0, item });
             output = [item];
