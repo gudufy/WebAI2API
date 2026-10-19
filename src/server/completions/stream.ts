@@ -1,6 +1,6 @@
 import { parseResultFromStream, type StreamReadOptions } from "../../deepseekStreamParser.js";
 import { estimateUsage } from "../responses/responsesType.js";
-import { ToolCallDelta, ToolCallParser } from "../toolPrompt.js";
+import { ToolCallDelta, ToolCallParser, type ToolDescription, validateToolCallArguments } from "../toolPrompt.js";
 import { ChatCompletionMessageFunctionToolCall, CompletionsFinishReason } from "./completionsType.js";
 
 export interface CompletionsChunk {
@@ -104,6 +104,7 @@ export async function streamEventsFromStream(
     inputLength: number,
     send: (data: any) => void,
     options: StreamReadOptions = {},
+    toolSchemas?: ToolDescription[],
 ) {
     const toolParser = useTool ? new ToolCallParser() : null;
     const builder = new StreamResponseBuilder(send, requestId, model);
@@ -149,7 +150,7 @@ export async function streamEventsFromStream(
 
         // 流式状态机没识别到的异常/混合协议，再用完整响应解析一次。
         // 只补充尚未识别的调用，不影响正常的实时文本输出。
-        for (const call of ToolCallParser.extractFromCompleteResponse(completeResponse)) {
+        for (const call of ToolCallParser.extractFromCompleteResponse(completeResponse, toolSchemas)) {
             addToolCall(call.tool, call.parameters);
         }
     }
@@ -157,6 +158,7 @@ export async function streamEventsFromStream(
     // 工具调用统一在 DeepSeek EOF 后发给 Codex，避免 Codex 在第一条调用后
     // 提前结束本轮；但普通中文文本仍然在 DeepSeek 输出过程中实时显示。
     for (const call of pendingToolCalls) {
+        if (!validateToolCallArguments(call.name, call.parameters, toolSchemas)) continue;
         builder.sendFunctionToolCall({
             id: ToolCallParser.buildCallId(call.name, call.parameters),
             type: 'function',
