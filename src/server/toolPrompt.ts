@@ -532,7 +532,7 @@ export class ToolCallParser {
         // 某些输出还会转义紧随工具名的 <params>。只在外层 wrapper 的参数起始位置修复，
         // 不对 JSON 参数内容做全局替换。
         responseContent = responseContent.replace(
-            /(<(?:tool_call|tool_use|call_exec|call_call|function_call|tool)>\\s*(?:[A-Za-z_][A-Za-z0-9_.:-]*\\s*)?)\\(?=<params>)/gi,
+            /(<(?:tool_call|tool_use|call_exec|call_call|function_call|tool)>\s*(?:[A-Za-z_][A-Za-z0-9_.:-]*\s*)?)\\(?=<params>)/gi,
             '$1 '
         );
         const results: parsedToolCall[] = [];
