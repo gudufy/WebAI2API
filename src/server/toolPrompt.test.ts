@@ -72,3 +72,45 @@ test("parses multiple DSML invokes from a complete response", () => {
         + response.slice(calls[1].start + calls[1].raw.length);
     assert.equal(ToolCallParser.stripProtocolMarkup(outsideCalls).includes("DSML"), false);
 });
+
+
+test("parses escaped outer tool-call tags without changing command arguments", () => {
+    const command = String.raw`Get-ChildItem -Force | Select-Object Mode,Name; Write-Output "C:\\Temp"`;
+    const response = String.raw`I'll inspect the folder.
+\\<tool_call>exec_command<params>{"cmd":${JSON.stringify(command)}}</params></tool_call>
+`;
+    const calls = ToolCallParser.extractFromCompleteResponse(response, tools);
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].tool, "exec_command");
+    assert.equal(JSON.parse(calls[0].parameters).cmd, command);
+    assert.equal(calls[0].start, response.indexOf("\\\\<tool_call>") + 1);
+});
+
+test("parses multiple mixed-format calls with repeated trailing tags", () => {
+    const response = [
+        "Checking the repository.",
+        String.raw`\\<tool_call>exec_command<params>{"cmd":"Get-ChildItem -Force | Select-Object Mode,Name"}</params></tool_call>`,
+        "I found the files.",
+        String.raw`<｜DSML｜ calls>`,
+        String.raw`<｜｜DSML｜｜ invoke name="exec_command">`,
+        String.raw`<｜DSML｜ parameter name="cmd" string="true">git status --short</｜｜DSML｜｜ parameter>`,
+        String.raw`</｜DSML｜ invoke>`,
+        String.raw`</｜DSML｜ calls>`,
+        String.raw`</tool_call></tool_call>`,
+    ].join("\n");
+
+    const calls = ToolCallParser.extractFromCompleteResponse(response, tools);
+    assert.equal(calls.length, 2);
+    assert.equal(JSON.parse(calls[0].parameters).cmd, "Get-ChildItem -Force | Select-Object Mode,Name");
+    assert.equal(JSON.parse(calls[1].parameters).cmd, "git status --short");
+});
+
+test("does not rewrite escaped protocol-looking text inside command arguments", () => {
+    const command = String.raw`Write-Output '\\<tool_call>literal text'`;
+    const response = `<tool_call>exec_command<params>${JSON.stringify({ cmd: command })}</params></tool_call>`;
+    const calls = ToolCallParser.extractFromCompleteResponse(response, tools);
+
+    assert.equal(calls.length, 1);
+    assert.equal(JSON.parse(calls[0].parameters).cmd, command);
+});
