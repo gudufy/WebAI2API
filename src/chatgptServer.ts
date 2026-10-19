@@ -18,7 +18,7 @@ function normalizeModel(model: unknown): string {
 
 function normalizeRequest(raw: any): ChatGPTBrowserRequest {
     const input = Array.isArray(raw?.input) ? raw.input : [];
-    const request: ChatGPTResponseRequest = {
+    const request: ChatGPTBrowserRequest = {
         ...raw,
         model: normalizeModel(raw?.model),
         input,
