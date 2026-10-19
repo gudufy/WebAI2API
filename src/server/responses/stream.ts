@@ -630,6 +630,7 @@ export async function streamEventsFromStream(
     }
 
     for (const call of pendingToolCalls) {
+        if (!validateToolCallArguments(call.name, call.parameters, toolSchemas)) continue;
         streamBuilder.sendToolCall({
             type: 'function_call',
             name: call.name,
