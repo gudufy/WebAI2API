@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { WebSocket } from "ws";
 
 export interface ChatGPTCredentials {
     accessToken: string;
@@ -72,6 +73,13 @@ export class ChatGPTResponsesClient {
         return headers;
     }
 
+    private websocketHeaders(): Record<string, string> {
+        const headers = this.headers();
+        delete headers["Content-Type"];
+        delete headers.Accept;
+        return headers;
+    }
+
     async createResponse(request: Omit<ChatGPTResponseRequest, "stream" | "store"> & Partial<Pick<ChatGPTResponseRequest, "stream" | "store">>, signal?: AbortSignal): Promise<ChatGPTStreamResult> {
         const body: ChatGPTResponseRequest = { ...request, stream: true, store: false };
         if (!Array.isArray(body.input)) throw new Error("ChatGPT Codex Responses requires input to be an array.");
@@ -92,6 +100,48 @@ export class ChatGPTResponsesClient {
             throw new Error(`ChatGPT Codex request failed (${response.status}): ${detail || response.statusText}`);
         }
         return { body: response.body };
+    }
+
+    async connectWebSocket(signal?: AbortSignal): Promise<WebSocket> {
+        const wsUrl = `${this.baseUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}/responses`;
+        console.log(`[ChatGPT] Connecting upstream WebSocket: ${wsUrl}`);
+        return await new Promise<WebSocket>((resolve, reject) => {
+            const ws = new WebSocket(wsUrl, { headers: this.websocketHeaders() });
+            let settled = false;
+            const cleanupAbort = () => signal?.removeEventListener("abort", onAbort);
+            const onAbort = () => {
+                if (settled) return;
+                settled = true;
+                ws.close();
+                cleanupAbort();
+                reject(new Error("ChatGPT WebSocket connection aborted."));
+            };
+            signal?.addEventListener("abort", onAbort, { once: true });
+            ws.once("open", () => {
+                if (settled) return;
+                settled = true;
+                cleanupAbort();
+                console.log("[ChatGPT] Upstream WebSocket connected.");
+                resolve(ws);
+            });
+            ws.once("unexpected-response", (_request, response) => {
+                if (settled) return;
+                settled = true;
+                cleanupAbort();
+                let detail = `HTTP ${response.statusCode}`;
+                response.on("data", chunk => { detail += ` ${String(chunk).slice(0, 500)}`; });
+                response.on("end", () => reject(new Error(`ChatGPT WebSocket handshake failed: ${detail}`)));
+            });
+            ws.once("error", error => {
+                if (settled) return;
+                settled = true;
+                cleanupAbort();
+                reject(error);
+            });
+            ws.once("close", (code, reason) => {
+                if (settled) console.log(`[ChatGPT] Upstream WebSocket closed: ${code} ${reason.toString()}`);
+            });
+        });
     }
 
     async listModels(signal?: AbortSignal): Promise<any[]> {
