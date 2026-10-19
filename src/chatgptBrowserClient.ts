@@ -103,6 +103,7 @@ export class ChatGPTBrowserClient {
     private context?: BrowserContext;
     private readonly pages = new Map<string, Page>();
     private defaultThread = "default";
+    private firstThreadId?: string;
 
     constructor(private readonly cdpUrl = process.env.CHATGPT_CDP_URL || "http://127.0.0.1:9222") {}
 
@@ -127,7 +128,9 @@ export class ChatGPTBrowserClient {
         let page = this.pages.get(key);
         if (page && !page.isClosed()) return page;
         const context = this.context!;
-        page = key === this.defaultThread
+        const reuseExistingTab = key === this.defaultThread || !this.firstThreadId;
+        if (key !== this.defaultThread && !this.firstThreadId) this.firstThreadId = key;
+        page = reuseExistingTab
             ? (context.pages().find(p => p.url().includes("chatgpt.com")) ?? await context.newPage())
             : await context.newPage();
         this.pages.set(key, page);
