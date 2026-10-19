@@ -193,6 +193,11 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
         const fullPrompt = [instructions, prompt].filter(Boolean).join("\n\n");
         const page = await this.pageFor(threadId);
         signal?.throwIfAborted();
+        const stopOnAbort = () => {
+            void page.locator('button[data-testid="stop-button"], button[aria-label*="Stop generating"]').last()
+                .click({ timeout: 1500 }).catch(() => undefined);
+        };
+        signal?.addEventListener("abort", stopOnAbort, { once: true });
 
         const messageSelector = 'main [data-message-author-role="assistant"]';
         const before = await page.locator(messageSelector).count().catch(() => 0);
@@ -269,6 +274,7 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
                 usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
             },
         });
+        signal?.removeEventListener("abort", stopOnAbort);
         controller.close();
     }
 
