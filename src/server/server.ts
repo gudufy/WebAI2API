@@ -1,0 +1,398 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { WebSocketServer } from "ws";
+import Stream from "node:stream";
+import process from "node:process";
+import { parseArgs } from "node:util";
+import { getDefaultCredentialPath } from "../auth.js";
+import { DeepSeekStreamError, parseResultFromStream } from "../deepseekStreamParser.js";
+import { isDirectRun } from "../utils.js";
+import {
+    getAllowedIpSummary,
+    isAllowlistedClient,
+    readRequestJson,
+    sendJson,
+    sendSseData,
+    sendSseDone,
+    sendSseHeaders,
+    corsHeaders,
+    errorResponse
+} from "./httpUtils.js";
+import { createServerClient, type ServerClient } from "./serverClient.js";
+import { buildResponseId } from "./responseId.js";
+import { MODEL_LIST } from "./models.js";
+import { asChatCompletionsRequest, ChatCompletionsResponse, message2CompletionsMessage, normalizeChatCompletionsRequest, uploadFiles as comp_uploadFiles } from "./completions/completionsType.js";
+import { streamEventsFromStream as completionsSFS } from "./completions/stream.js";
+import { asResponsesCreateRequest, estimateUsage, message2ResponsesOutput, normalizeResponsesRequest, ResponseOutputMessage, type ResponsesResponse, uploadFiles as resp_uploadFiles } from "./responses/responsesType.js";
+import { enqueueDeepSeekRequest, enqueueResponseSessionRequest, rememberResponseSessionMessageId, resolveQueuedParentMessageId } from "./responses/sessionQueue.js";
+import { shouldParseToolCall } from "./toolPrompt.js";
+import { rememberResponseSessionTools } from "./responses/responsesType.js";
+import { streamEventsFromStream } from "./responses/stream.js";
+import { WebSocketSessionManager } from "./responses/websocketHandler.js";
+
+const DEFAULT_PORT = 8787;
+
+async function handleModels(res: ServerResponse) {
+    sendJson(res, 200, {
+        object: "list",
+        data: MODEL_LIST.map((id) => ({
+            id,
+            object: "model",
+            created: 0,
+            owned_by: "localhost",
+        })),
+    });
+}
+
+async function handleChatCompletions(req: IncomingMessage, res: ServerResponse, client: ServerClient) {
+    const rawInput = asChatCompletionsRequest(await readRequestJson(req));
+    const normalized = normalizeChatCompletionsRequest(rawInput);
+    const fileIds = await comp_uploadFiles(rawInput, client, normalized.modelType);
+    const useTool = shouldParseToolCall(rawInput.tool_choice, rawInput.tools);
+
+    if (!normalized.message.trim()) {
+        sendJson(res, 400, errorResponse("messages must include at least one non-empty message."));
+        return;
+    }
+
+    const abortController = new AbortController();
+    res.once("close", () => { if (!res.writableEnded) abortController.abort(); });
+    if (res.destroyed) abortController.abort();
+
+    let sessionId: string | null = null;
+    try {
+        const runResult = await enqueueDeepSeekRequest(() => client.runChatCompletion({
+            ...normalized,
+            fileIds,
+            signal: abortController.signal,
+        }));
+
+        const requestId = sessionId = runResult.sessionId;
+        const streamOptions = {
+            signal: abortController.signal,
+            continueChat: (messageId: number) => enqueueDeepSeekRequest(() => client.continueChat({ sessionId: requestId, messageId, signal: abortController.signal })),
+            stopChat: (messageId: number) => client.stopChat({ sessionId: requestId, messageId }),
+        };
+
+        if (!rawInput.stream) {
+            const parsed = await parseResultFromStream(runResult.body, undefined, streamOptions);
+            const thinking = parsed.thinking.trim();
+            const msg = message2CompletionsMessage(parsed.text, useTool);
+            if (thinking) {
+                msg.reasoning_content = thinking;
+            }
+            const usage = estimateUsage(parsed.accumulated_token_usage, normalized.message.length, parsed.text.length + thinking.length);
+            sendJson(res, 200, {
+                id: requestId,
+                object: "chat.completion",
+                created: Math.floor(Date.now() / 1000),
+                model: normalized.model,
+                choices: [{
+                    index: 0,
+                    message: msg,
+                    finish_reason: msg.tool_calls ? "tool_calls" : "stop",
+                }],
+                usage: {
+                    total_tokens: usage.total_tokens,
+                    prompt_tokens: usage.input_tokens,
+                    completion_tokens: usage.output_tokens,
+                },
+            } as ChatCompletionsResponse);
+            return;
+        }
+
+        // 流式返回
+        sendSseHeaders(res);
+        await completionsSFS(
+            runResult.body,
+            useTool,
+            requestId,
+            normalized.model,
+            normalized.message.length,
+            (data) => {
+                if (abortController.signal.aborted || res.writableEnded) return;
+                sendSseData(res, data);
+            },
+            streamOptions,
+        );
+        sendSseDone(res);
+    } catch (error) {
+        if (abortController.signal.aborted || res.writableEnded) return;
+        const message = error instanceof Error ? error.message : String(error);
+        const id = buildResponseId(sessionId, error instanceof DeepSeekStreamError ? error.messageId : null);
+        if (res.headersSent) {
+            sendSseData(res, errorResponse(message, 500, "server_error", id));
+            sendSseDone(res);
+            return;
+        }
+        if (message.includes("Unsupported model:")) {
+            sendJson(res, 400, errorResponse(message));
+            return;
+        }
+        sendJson(res, 500, errorResponse(message, 500, "server_error", id));
+    } finally {
+        // completions 为无状态接口，请求结束后删除会话。
+        if (sessionId) {
+            try {
+                await client.deleteSession(sessionId);
+            } catch (cleanupError) {
+                const msg = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+                console.warn(`[myds] Failed to delete completion session ${sessionId}: ${msg}`);
+            }
+        }
+    }
+}
+
+async function handleResponses(req: IncomingMessage, res: ServerResponse, client: ServerClient) {
+    const rawInput = asResponsesCreateRequest(await readRequestJson(req));
+    const useTool = shouldParseToolCall(rawInput.tool_choice, rawInput.tools);
+    const normalized = normalizeResponsesRequest(rawInput);
+    if (!normalized.message) {
+        sendJson(res, 400, errorResponse("input must include at least one non-empty message."));
+        return;
+    }
+    const fileIds = await resp_uploadFiles(rawInput, client, normalized.modelType);
+    const abortController = new AbortController();
+    res.once("close", () => { if (!res.writableEnded) abortController.abort(); });
+    if (res.destroyed) abortController.abort();
+
+    const queueSessionId = normalized.sessionId ?? null;
+    let sessionId = queueSessionId;
+    const execute = async () => {
+        const runResult = await enqueueDeepSeekRequest(() => client.runChatCompletion({
+            ...normalized,
+            fileIds,
+            parentMessageId: queueSessionId
+                ? resolveQueuedParentMessageId(queueSessionId, normalized.parentMessageId)
+                : normalized.parentMessageId,
+            signal: abortController.signal,
+        }));
+        const requestId = sessionId = runResult.sessionId;
+        rememberResponseSessionTools(runResult.sessionId, rawInput.tool_choice, rawInput.tools?.map(tool => ({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+        })));
+        const streamOptions = {
+            signal: abortController.signal,
+            continueChat: (messageId: number) => enqueueDeepSeekRequest(() => client.continueChat({ sessionId: requestId, messageId, signal: abortController.signal })),
+            stopChat: (messageId: number) => client.stopChat({ sessionId: requestId, messageId }),
+        };
+
+        if (rawInput.stream === true) {
+            sendSseHeaders(res);
+            const parsed = await streamEventsFromStream(
+                runResult.body,
+                useTool,
+                requestId,
+                normalized.model,
+                normalized.message.length,
+                (data) => {
+                    if (abortController.signal.aborted || res.writableEnded) return;
+                    sendSseData(res, data);
+                },
+                streamOptions,
+            );
+            rememberResponseSessionMessageId(requestId, parsed.messageId);
+            sendSseDone(res);
+            return;
+        }
+
+        // 一次性解析完
+        const parsed = await parseResultFromStream(runResult.body, undefined, streamOptions);
+        const id = buildResponseId(requestId, parsed.messageId);
+        const output = message2ResponsesOutput(parsed.text, id, useTool);
+        if (parsed.thinking.trim()) {   // 添加思考字段
+            output.push({
+                type: 'reasoning',
+                content: [{
+                    type: 'output_text',
+                    text: parsed.thinking.trim(),
+                    annotations: [],
+                }],
+                role: 'assistant',
+                id: `thinking_${id}`,
+                status: 'completed',
+            } as ResponseOutputMessage);
+        }
+        rememberResponseSessionMessageId(requestId, parsed.messageId);
+        const result: ResponsesResponse = {
+            id,
+            object: "response",
+            created_at: Math.floor(Date.now() / 1000),
+            status: "completed",
+            model: normalized.model,
+            output,
+            usage: estimateUsage(parsed.accumulated_token_usage, normalized.message.length, parsed.text.length + parsed.thinking.length),
+        };
+        sendJson(res, 200, result);
+    };
+
+    try {
+        if (queueSessionId) {
+            await enqueueResponseSessionRequest(queueSessionId, execute);
+        } else {
+            await execute();
+        }
+    } catch (error) {
+        if (abortController.signal.aborted || res.writableEnded) {
+            return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        const id = buildResponseId(sessionId, error instanceof DeepSeekStreamError ? error.messageId : null);
+        if (res.headersSent) {
+            sendSseData(res, { ...(id ? { id } : {}), type: "error", code: "server_error", message, param: null });
+            sendSseDone(res);
+            return;
+        }
+        if (message.includes("Unsupported model:")) {
+            sendJson(res, 400, errorResponse(message));
+            return;
+        }
+        sendJson(res, 500, errorResponse(message, 500, "server_error", id));
+    }
+}
+
+async function handleRequest(req: IncomingMessage, res: ServerResponse, client: ServerClient) {
+    const method = req.method ?? "GET";
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    if (!isAllowlistedClient(req)) {
+        sendJson(res, 403, errorResponse("Forbidden: client IP is not in allowlist.", 403, "forbidden"));
+        return;
+    }
+
+    if (method === "OPTIONS") {
+        res.writeHead(204, {
+            ...corsHeaders(res),
+            "Access-Control-Allow-Headers": "content-type, authorization, x-requested-with",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        });
+        res.end();
+        return;
+    }
+
+    if (method === "GET" && url.pathname === "/health") {
+        sendJson(res, 200, { ok: true });
+        return;
+    }
+
+    if (method === "GET" && url.pathname === "/v1/models") {
+        await handleModels(res);
+        return;
+    }
+
+    if (method === "POST" && url.pathname === "/v1/chat/completions") {
+        await handleChatCompletions(req, res, client);
+        return;
+    }
+
+    if (method === "POST" && url.pathname === "/v1/responses") {
+        await handleResponses(req, res, client);
+        return;
+    }
+
+    sendJson(res, 404, errorResponse(`Route not found: ${method} ${url.pathname}`, 404, "not_found"));
+}
+
+function handleWebSocketUpgrade(
+    req: IncomingMessage,
+    socket: Stream.Duplex,
+    head: Buffer,
+    wss: WebSocketServer,
+    client: ServerClient
+) {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    if (!isAllowlistedClient(req)) {
+        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+        socket.destroy();
+        return;
+    }
+
+    // 只有 /v1/responses 支持 WebSocket
+    if (url.pathname === "/v1/responses") {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            console.log(`[WebSocket] New connection from ${req.socket.remoteAddress}`);
+            new WebSocketSessionManager(ws, client);
+        });
+        return;
+    }
+
+    socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    socket.destroy();
+}
+
+async function main() {
+    const parsed = parseArgs({
+        args: process.argv.slice(2),
+        options: {
+            port: { type: "string", short: "p", default: String(DEFAULT_PORT) },
+            browser: { type: "boolean" },
+            "user-data-dir": { type: "string" },
+            credentials: { type: "string", short: "c" },
+        },
+        allowPositionals: false,
+        strict: true,
+    });
+
+    const browserMode = parsed.values.browser ?? false;
+    const credentialPath = parsed.values.credentials ?? getDefaultCredentialPath();
+    const userDataDir = parsed.values["user-data-dir"];
+
+    const client = await createServerClient({
+        browserMode,
+        credentialPath,
+        userDataDir,
+    });
+
+    const shutdown = async () => {
+        try {
+            await client.close();
+        } catch {
+            // ignore shutdown errors
+        }
+    };
+
+    process.on("SIGINT", () => {
+        shutdown().finally(() => process.exit(0));
+    });
+    process.on("SIGTERM", () => {
+        shutdown().finally(() => process.exit(0));
+    });
+
+    // 处理 HTTP 请求
+    const server = createServer((req, res) => {
+        handleRequest(req, res, client).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!res.headersSent) {
+                sendJson(res, 500, errorResponse(message, 500, "server_error"));
+                return;
+            }
+            res.end();
+        });
+    });
+
+    // 处理 WebSocket 升级请求
+    const wss = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (req, socket, head) => {
+        handleWebSocketUpgrade(req, socket, head, wss, client);
+    });
+
+    const port = Number(parsed.values.port) || DEFAULT_PORT;
+    server.listen(port, () => {
+        console.log(`[WebAI2API] HTTP server listening on http://127.0.0.1:${port}`);
+        console.log(`[WebAI2API] WebSocket support enabled on ws://127.0.0.1:${port}/v1/responses`);
+        console.log(`[WebAI2API] Client mode: ${client.mode}`);
+        console.log(`[WebAI2API] Allowed client IPs: ${getAllowedIpSummary()}`);
+        if (client.mode === "browser" && userDataDir) {
+            console.log(`[WebAI2API] Browser user-data-dir: ${userDataDir}`);
+        }
+    });
+}
+
+if (isDirectRun(import.meta.url)) {
+    main().catch((error) => {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+    });
+}

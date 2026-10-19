@@ -1,0 +1,434 @@
+// https://developers.openai.com/api/reference/resources/responses/methods/create
+import path from "node:path";
+import { ToolChoice } from '../completions/completionsType.js';
+export const READY_RESPONSE_ID = "noop-empty-input";    // 有时候一定要有一个响应ID返回，就返回这个值为前缀的
+
+// ======= 输入 =======
+export interface ResponsesCreateRequest {
+    model?: string;
+    instructions?: string;
+    input: string | ResponsesInputItem[];
+    stream?: boolean;
+    tools?: ResponsesFunctionTool[];
+    tool_choice: ToolChoice;    // 在 asResponsesCreateRequest 中会自动填充默认值
+    // 对话上下文关联 放弃了conversation字段
+    previous_response_id?: string; // session_id|message_id
+    // Codex 用它标识真正的对话线程。WebSocket 连接可以频繁重建，但 thread_id 会保持。
+    client_metadata?: Record<string, string>;
+}
+
+// 只选了这几个
+export type ResponsesInputItem =
+    | EasyInputMessage
+    | FunctionCallOutput;
+
+// 消息类型
+export interface EasyInputMessage {
+    type?: 'message';   // 缺省类型是message
+    role: 'system' | 'developer' | 'user' | 'assistant';
+    content: string | ResponseInputContent[];
+    // phase?: 'commentary' | 'final_answer'; 不实现
+}
+
+export type ResponseInputContent = ResponseInputText | ResponseInputImage | ResponseInputFile;
+export interface ResponseInputText {
+    text: string;
+    type: 'input_text' | 'output_text'; // 虽然官方文档没有output_text，但是codex会原封不动加到输入中
+}
+export interface ResponseInputImage {
+    detail: 'auto' | 'low' | 'high' | 'original';
+    type: 'input_image';
+    file_id?: string;
+    image_url?: string;
+}
+export interface ResponseInputFile {
+    detail: 'low' | 'high';
+    type: 'input_file';
+    file_id?: string;
+    file_url?: string;
+    file_name?: string;
+    file_data?: string;   // base64
+}
+
+// 调用结果
+export interface FunctionCallOutput {
+    call_id: string;    // 约定使用 toolcall 的 json
+    output: string;
+    type: 'function_call_output';
+    // id?: string;
+    status?: callStatus;
+}
+
+export type callStatus = 'Inprogress' | 'Completed' | 'Incomplete';
+
+// tools
+export interface ResponsesFunctionTool {
+    type: 'function';
+    name: string;
+    parameters?: Record<string, unknown>;
+    description?: string;
+}
+
+
+// ======= 输出 =======
+export interface ResponsesResponse {
+    id: string; // session_id|message_id
+    object: 'response';
+    created_at: number;
+    status: 'completed' | 'in_progress' | 'failed' | 'cancelled' | 'incomplete' | 'queued';
+    model: string;
+    output: ResponseOutputItem[];
+    error?: ResponsesError | null;
+    usage: {
+        input_tokens: number;
+        output_tokens: number;
+        total_tokens: number;
+    } | null;
+}
+
+export type ResponseOutputItem =
+    | ResponseOutputMessage
+    | ResponseOutputFuncionCall;
+
+interface ResponseOutputItemBase {
+    type: string;
+    id: string;    // 这个id是本回合返回内的唯一id，流式响应要用
+    status: 'in_progress' | 'completed' | 'incomplete';
+}
+
+export interface ResponseOutputMessage extends ResponseOutputItemBase {
+    type: 'message' | 'reasoning';
+    content: ResponseOutputMessageContent[];
+    role: 'assistant';
+}
+export type ResponseOutputMessageContent = ResponseOutputText | ResponseOutputRefusal;
+export interface ResponseOutputText {
+    type: 'output_text';
+    text: string;
+    annotations: any[];    // 链接引用 先不实现
+}
+export interface ResponseOutputRefusal {
+    type: 'refusal';
+    refusal: string;
+}
+
+export interface ResponseOutputFuncionCall extends ResponseOutputItemBase {
+    type: 'function_call';
+    call_id: string;
+    name: string;
+    arguments: string;  // json格式
+}
+
+export interface ResponsesError {
+    code: 'server_error' | 'rate_limit_exceeded' | 'invalid_prompt' | 'vector_store_timeout' | 'invalid_image' | 'invalid_image_format' | 'invalid_base64_image'
+    | 'invalid_image_url' | 'image_too_large' | 'image_too_small' | 'image_parse_error' | 'image_content_policy_violation' | 'invalid_image_mode'
+    | 'image_file_too_large' | 'unsupported_image_media_type' | 'empty_image_file' | 'failed_to_download_image' | 'image_file_not_found';
+    message: string;
+}
+
+// ===== 转为模型输入 =====
+import  type { ServerChatRequest } from '../../deepseekWebClient.js';
+import { parseResponseId } from '../responseId.js';
+import { ToolDescription, buildToolPrompt, ToolCallParser, autoToolChoice } from '../toolPrompt.js';
+import { getModelConfig } from '../models.js';
+import { ServerClient } from '../serverClient.js';
+
+// 类型转换 & 填充默认值
+export function asResponsesCreateRequest(req: any): ResponsesCreateRequest {
+    if (typeof req.input !== 'string' && !Array.isArray(req.input)) req.input = '';
+    req.tool_choice ??= autoToolChoice(req.tools);
+    return req as ResponsesCreateRequest;
+}
+
+// 同一个 Responses/DeepSeek 会话中，工具定义只需要注入一次。
+// Codex 每次请求都会重复携带 tools，但 DeepSeek 网页会话已经保留了上一轮上下文。
+// 只缓存工具签名，不缓存完整 prompt，避免长期占用几十 KB 的字符串。
+const responseSessionToolFingerprints = new Map<string, string>();
+const MAX_RESPONSE_SESSION_TOOL_CACHE = 256;
+
+function getToolFingerprint(toolChoice: ToolChoice, tools?: ToolDescription[]): string {
+    return JSON.stringify({ toolChoice, tools: tools ?? [] });
+}
+
+export function rememberResponseSessionTools(
+    sessionId: string | null | undefined,
+    toolChoice: ToolChoice,
+    tools?: ToolDescription[],
+): void {
+    if (!sessionId || sessionId.startsWith(READY_RESPONSE_ID)) return;
+    responseSessionToolFingerprints.delete(sessionId);
+    responseSessionToolFingerprints.set(sessionId, getToolFingerprint(toolChoice, tools));
+    while (responseSessionToolFingerprints.size > MAX_RESPONSE_SESSION_TOOL_CACHE) {
+        const oldest = responseSessionToolFingerprints.keys().next().value;
+        if (!oldest) break;
+        responseSessionToolFingerprints.delete(oldest);
+    }
+}
+
+export function clearResponseSessionTools(sessionId: string | null | undefined): void {
+    if (sessionId) responseSessionToolFingerprints.delete(sessionId);
+}
+
+export function normalizeResponsesRequest(
+    x: ResponsesCreateRequest,
+    sessionIdHint?: string | null,
+): ServerChatRequest & { model: string } {
+    // 如果 previous_response_id 是 noop-empty-input，当作 session 为 null 处理
+    const modelConfig = getModelConfig(x.model);
+    const prevId = (x.previous_response_id && !x.previous_response_id.startsWith(READY_RESPONSE_ID)) ? x.previous_response_id : '';
+    const parsedResponseId = parseResponseId(prevId);
+    const sessionId = parsedResponseId.sessionId ?? (sessionIdHint && !sessionIdHint.startsWith(READY_RESPONSE_ID) ? sessionIdHint : null);
+    const messageId = parsedResponseId.messageId;
+    // 构建prompt
+    const toolDescriptions = (x.tools ?? []).map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+    } as ToolDescription));
+    const cachedToolFingerprint = sessionId ? responseSessionToolFingerprints.get(sessionId) : undefined;
+    const toolFingerprint = getToolFingerprint(x.tool_choice, toolDescriptions);
+    // Codex 的后续请求有时不会重复携带 tools。只要当前 DeepSeek session 已经注入过工具定义，
+    // 就继续复用会话上下文，不要重新塞几十 KB 的工具 prompt。
+    const toolPromptAlreadySent = !!sessionId && !!cachedToolFingerprint
+        && (x.tools === undefined || cachedToolFingerprint === toolFingerprint);
+    const toolprompt = toolPromptAlreadySent ? '' : buildToolPrompt(x.tool_choice, toolDescriptions);
+    const instructions = x.instructions ? `[system]:\n${x.instructions}` : '';
+    const textMessages = messageFromInputItem(x.input, toolprompt.length < 10 && !instructions);
+    return {
+        // toolprompt 放在前面很重要，不再在末尾重复注入另一套工具协议
+        message: [toolprompt, instructions, textMessages].filter((s): s is string => !!s).join('\n\n').trim(),
+        sessionId: sessionId ?? undefined,
+        parentMessageId: messageId ?? null,
+        preempt: false,
+        model: modelConfig.model,   // 尽量保留原始model字段
+        modelType: modelConfig.modelType,
+        searchEnabled: modelConfig.searchEnabled,
+        thinkingEnabled: modelConfig.thinkingEnabled,
+    }
+}
+
+// 处理 message function_call_output
+function messageFromInputItem(items: string | ResponsesInputItem[], dropFirstRole = false): string {
+    if (typeof items === 'string') return items;
+    if (items.length === 0) return '';
+
+    function easyInputToText(item: EasyInputMessage): string[] {
+        const outputs: string[] = [];
+        // 忽略空的
+        if (typeof item.content === 'string') {
+            if (item.content.length > 0) outputs.push(item.content);
+        } else {
+            for (const contentItem of item.content) {
+                if (contentItem.type.includes('text')) {
+                    const t = (contentItem as ResponseInputText).text;
+                    if (t.length > 0) outputs.push(t);
+                }
+                // 文件在这里先用文本占位，上传需要client，在server中实现
+                else if (contentItem.type.includes('image')) {
+                    // 忽略 detail image_url id 字段
+                    outputs.push('<user_image />');
+                } else if (contentItem.type.includes('file')) {
+                    const item = contentItem as ResponseInputFile;
+                    const file = ['<user_file'];
+                    // 忽略 detail file_url id 字段
+                    if (item.file_name) file.push(`name=${item.file_name}`);
+                    file.push('/>');
+                    outputs.push(file.join(' '));
+                }
+            }
+        } return outputs;
+    }
+
+    const messages: string[] = [];
+
+    for (const item of items) {
+        if (!item.type || item.type === 'message') {
+            const content = easyInputToText(item as EasyInputMessage);
+            if (content.length > 0) {
+                messages.push(`[${item.role}]:`);
+                messages.push(...content);
+            }
+        } else if (item.type === 'function_call_output') {
+            // 本项目中 call_id 是源码
+            messages.push(`[user tool call result]:\n${item.call_id}\n<output>${item.output}</output>${item.status ? `\n<status>${item.status}</status>` : ''}`);
+        }
+    }
+    // 如果只有一项且是用户消息则不需要role标签
+    if (dropFirstRole && items.length === 1 && (items[0].type === undefined || items[0].type === 'message') && items[0].role === 'user') {
+        messages.shift();
+    }
+    return messages.join('\n\n');
+}
+
+// WebSocket特判：只有当有输入的时候才发出去
+export function hasRunnableUserInput(items: string | ResponsesInputItem[]): boolean {
+    if (typeof items === 'string') return items.trim().length > 0;
+
+    for (const item of items) {
+        if (item.type === 'function_call_output') {
+            const output = (item.output ?? '').trim();
+            if (output.length > 0) return true;
+            continue;
+        }
+
+        const messageItem = item as EasyInputMessage;
+        if (messageItem.role !== 'user') continue;
+        if (typeof messageItem.content === 'string') {
+            if (messageItem.content.trim().length > 0) return true;
+            continue;
+        }
+        for (const content of messageItem.content) {
+            if (content.type === 'input_text' && content.text.trim().length > 0) {
+                return true;
+            }
+        }
+    } return false;
+}
+
+// 暂时不处理文件
+
+
+export function message2ResponsesOutput(msg: string, mark: string, matchTool = false): ResponseOutputItem[] {
+    const outputs: ResponseOutputItem[] = [];
+
+    type ParsedSegment = {
+        start: number;
+        end: number;
+        output: ResponseOutputItem;
+    };
+
+    const segments: ParsedSegment[] = [];
+
+    if (matchTool) {
+        const toolCalls = ToolCallParser.parseToolCalls(msg);
+        for (const call of toolCalls) {
+            segments.push({
+                start: call.start,
+                end: call.start + call.raw.length,
+                output: {
+                    type: 'function_call',
+                    call_id: ToolCallParser.buildCallId(call.tool, call.parameters),
+                    name: call.tool,
+                    arguments: call.parameters,
+                    id: 'func_call_',
+                    status: 'completed'
+                },
+            });
+        }
+    }
+
+    segments.sort((a, b) => {
+        if (a.start !== b.start) return a.start - b.start;
+        return b.end - a.end;
+    });
+
+    let cursor = 0;
+    for (const segment of segments) {
+        if (segment.start < cursor) continue;
+
+        const textBefore = msg.slice(cursor, segment.start).trim();
+        if (textBefore) {
+            outputs.push({
+                type: 'message',
+                content: [{
+                    type: 'output_text',
+                    text: textBefore,
+                    annotations: []
+                }],
+                role: 'assistant',
+                id: 'msg_',
+                status: 'completed'
+            });
+        }
+
+        outputs.push(segment.output);
+        cursor = segment.end;
+    }
+
+    const tailText = msg.slice(cursor).trim();
+    if (tailText) {
+        outputs.push({
+            type: 'message',
+            content: [{
+                type: 'output_text',
+                text: tailText,
+                annotations: []
+            }],
+            role: 'assistant',
+            id: 'msg_',
+            status: 'completed'
+        });
+    }
+
+    // 整理id
+    for (let i = 0; i < outputs.length; i++) {
+        outputs[i].id += `${mark}_${i}`;    // 需要保持全局唯一
+    }
+    return outputs;
+}
+
+// 估计usage字段 codex需要 缺失会报错
+export function estimateUsage(total: number, inputLength: number, outputLength: number) {
+    // DeepSeek 未返回 accumulated_token_usage 时为 -1，直接估算会得到负数 usage，
+    // 而 Codex 会校验 usage 字段。此处兜底为 0。
+    if (!Number.isFinite(total) || total <= 0) {
+        return { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+    }
+    let input_token_est = inputLength >> 2; // 4字符1token的经验值
+    let output_token_est = outputLength >> 2;
+    input_token_est = Math.floor(total * input_token_est / (input_token_est + output_token_est));
+    output_token_est = total - input_token_est;
+    return {
+        input_tokens: input_token_est,
+        output_tokens: output_token_est,
+        total_tokens: total,
+    }
+}
+
+function getImageFileName(imageUrl: string): string {
+    if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+        return path.basename(new URL(imageUrl).pathname) || 'image.png';
+    }
+    return path.basename(imageUrl) || 'image.png';
+}
+
+function _uploadFiles(contents: ResponseInputContent[], client: ServerClient, modelType: ServerChatRequest["modelType"]): Promise<string[]> {
+    const promises: Promise<string>[] = [];
+    for (const content of contents) {
+        switch (content.type) {
+            case 'input_image':
+                if (content.file_id) {
+                    promises.push(Promise.resolve(content.file_id));
+                } else if (content.image_url) {
+                    promises.push(client.uploadFile(content.image_url, getImageFileName(content.image_url), modelType));
+                } break;
+            case 'input_file':
+                if (content.file_id) {
+                    promises.push(Promise.resolve(content.file_id));
+                } else if (content.file_data) {
+                    promises.push(client.uploadFile(Buffer.from(content.file_data, 'base64'), content.file_name ?? `file_${Date.now()}`, modelType));
+                } else if (content.file_url) {
+                    promises.push(client.uploadFile(content.file_url, content.file_name ?? `file_${Date.now()}`, modelType));
+                } break;
+            default:
+                break;
+        }
+    } return Promise.all(promises);
+}
+
+export function uploadFiles(req: ResponsesCreateRequest, client: ServerClient, modelType: ServerChatRequest["modelType"]): Promise<string[]> {
+    const inputItems = req.input;
+    if (typeof inputItems === 'string') return Promise.resolve([]);
+    const contents: ResponseInputContent[] = [];
+    for (const item of inputItems) {
+        if (!(item.type === 'message' || item.type === undefined)) continue;
+        const messageItem = item as EasyInputMessage;
+        if (typeof messageItem.content === 'string') continue;
+        for (const contentItem of messageItem.content) {
+            if (contentItem.type.includes('image') || contentItem.type.includes('file')) {
+                contents.push(contentItem);
+            }
+        }
+    }
+    return _uploadFiles(contents, client, modelType);
+}

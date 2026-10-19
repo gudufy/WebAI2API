@@ -1,0 +1,1 @@
+pnpm run server -p 8787 --credentials=".data/deepseek-credentials.json" --browser
