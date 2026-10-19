@@ -84,7 +84,7 @@ test("parses escaped outer tool-call tags without changing command arguments", (
     assert.equal(calls.length, 1);
     assert.equal(calls[0].tool, "exec_command");
     assert.equal(JSON.parse(calls[0].parameters).cmd, command);
-    assert.equal(calls[0].start, response.indexOf("\<tool_call>") + 1);
+    assert.equal(calls[0].start, response.indexOf("\\<tool_call>") + 1);
 });
 
 test("parses multiple mixed-format calls with repeated trailing tags", () => {
