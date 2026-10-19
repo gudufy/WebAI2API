@@ -54,22 +54,28 @@ function metadataFromUpgrade(req: IncomingMessage): ChatGPTWebSocketMetadata {
 }
 
 function metadataFromResponseCreate(message: any, fallback: ChatGPTWebSocketMetadata): ChatGPTWebSocketMetadata {
-    const clientMetadata = message?.client_metadata;
-    if (!clientMetadata || typeof clientMetadata !== "object" || Array.isArray(clientMetadata)) return fallback;
+    // Codex builds may place these values in client_metadata, metadata, or directly
+    // on response.create. Read all known shapes before opening the upstream socket,
+    // because these values must be present in the upstream WebSocket handshake.
+    const sources = [message?.client_metadata, message?.metadata, message]
+        .filter((value): value is Record<string, unknown> =>
+            !!value && typeof value === "object" && !Array.isArray(value));
     const get = (...keys: string[]): string | undefined => {
-        for (const key of keys) {
-            const value = clientMetadata[key];
-            if (typeof value === "string" && value.trim()) return value.trim();
+        for (const source of sources) {
+            for (const key of keys) {
+                const value = source[key];
+                if (typeof value === "string" && value.trim()) return value.trim();
+            }
         }
         return undefined;
     };
     return {
         ...fallback,
-        sessionId: get("session_id") || fallback.sessionId,
-        threadId: get("thread_id") || fallback.threadId,
-        turnId: get("turn_id") || fallback.turnId,
-        windowId: get("x-codex-window-id", "window_id") || fallback.windowId,
-        turnMetadata: get("x-codex-turn-metadata") || fallback.turnMetadata,
+        sessionId: get("session_id", "sessionId") || fallback.sessionId,
+        threadId: get("thread_id", "threadId") || fallback.threadId,
+        turnId: get("turn_id", "turnId") || fallback.turnId,
+        windowId: get("x-codex-window-id", "window_id", "windowId") || fallback.windowId,
+        turnMetadata: get("x-codex-turn-metadata", "turn_metadata", "turnMetadata") || fallback.turnMetadata,
         version: get("version") || fallback.version,
     };
 }
