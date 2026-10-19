@@ -1,6 +1,7 @@
 // https://developers.openai.com/api/reference/resources/responses/methods/create
 import path from "node:path";
 import { ToolChoice } from '../completions/completionsType.js';
+import type { ToolDescription } from '../toolPrompt.js';
 export const READY_RESPONSE_ID = "noop-empty-input";    // 有时候一定要有一个响应ID返回，就返回这个值为前缀的
 
 // ======= 输入 =======
@@ -288,7 +289,7 @@ export function hasRunnableUserInput(items: string | ResponsesInputItem[]): bool
 // 暂时不处理文件
 
 
-export function message2ResponsesOutput(msg: string, mark: string, matchTool = false): ResponseOutputItem[] {
+export function message2ResponsesOutput(msg: string, mark: string, matchTool = false, tools?: ToolDescription[]): ResponseOutputItem[] {
     const outputs: ResponseOutputItem[] = [];
 
     type ParsedSegment = {
@@ -300,7 +301,7 @@ export function message2ResponsesOutput(msg: string, mark: string, matchTool = f
     const segments: ParsedSegment[] = [];
 
     if (matchTool) {
-        const toolCalls = ToolCallParser.parseToolCalls(msg);
+        const toolCalls = ToolCallParser.parseToolCalls(msg, tools);
         for (const call of toolCalls) {
             segments.push({
                 start: call.start,
