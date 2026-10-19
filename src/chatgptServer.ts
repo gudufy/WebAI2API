@@ -88,9 +88,16 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTBrowserClien
             if (ws.readyState !== 1) return;
             activeAbort = new AbortController();
             try {
-                const metadata = [message?.client_metadata, message?.metadata, message]
-                    .find(value => value && typeof value === "object") ?? {};
-                const threadId = String(metadata.thread_id || metadata.threadId || metadata.session_id || metadata.sessionId || "default");
+                const metadataSources = [message?.client_metadata, message?.metadata, message]
+                    .filter(value => value && typeof value === "object" && !Array.isArray(value));
+                let threadId = "default";
+                for (const metadata of metadataSources) {
+                    const value = metadata.thread_id || metadata.threadId || metadata.session_id || metadata.sessionId;
+                    if (typeof value === "string" && value.trim()) {
+                        threadId = value.trim();
+                        break;
+                    }
+                }
                 const response = await client.createResponse(normalizeRequest(message), threadId, activeAbort.signal);
                 for await (const event of parseSseStream(response.body)) {
                     if (ws.readyState !== 1) break;
