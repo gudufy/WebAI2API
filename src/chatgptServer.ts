@@ -7,13 +7,20 @@ import { errorResponse, getAllowedIpSummary, isAllowlistedClient, readRequestJso
 import { isDirectRun } from "./utils.js";
 
 const DEFAULT_PORT = 8787;
-const DEFAULT_MODEL = "gpt-5.5";
+const DEFAULT_MODEL = process.env.CHATGPT_MODEL?.trim() || "gpt-5.5";
+
+function normalizeModel(model: unknown): string {
+    const requested = typeof model === "string" && model.trim() ? model.trim() : DEFAULT_MODEL;
+    if (/^gpt-/i.test(requested)) return requested;
+    console.log(`[ChatGPT] Mapping local model "${requested}" -> "${DEFAULT_MODEL}"`);
+    return DEFAULT_MODEL;
+}
 
 function normalizeRequest(raw: any): ChatGPTResponseRequest {
     const input = Array.isArray(raw?.input) ? raw.input : [];
     const request: ChatGPTResponseRequest = {
         ...raw,
-        model: typeof raw?.model === "string" && raw.model.trim() ? raw.model : DEFAULT_MODEL,
+        model: normalizeModel(raw?.model),
         input,
         instructions: typeof raw?.instructions === "string" && raw.instructions.trim() ? raw.instructions : "You are a helpful coding assistant.",
         stream: true,
@@ -87,8 +94,9 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesCli
             console.log(`[Local WS] <- ${message.type || "unknown"}${message.model ? ` model=${message.model}` : ""}`);
             const socket = await getUpstream();
             if (socket.readyState !== 1) throw new Error(`Upstream WebSocket is not open (state=${socket.readyState}).`);
-            socket.send(text);
-            console.log(`[Upstream WS] -> ${message.type || "unknown"}`);
+            const outgoing = message.type === "response.create" ? { ...message, model: normalizeModel(message.model) } : message;
+            socket.send(JSON.stringify(outgoing));
+            console.log(`[Upstream WS] -> ${message.type || "unknown"}${message.type === "response.create" ? ` model=${normalizeModel(message.model)}` : ""}`);
         } catch (error) {
             console.error(`[Local WS] Error: ${error instanceof Error ? error.message : String(error)}`);
             if (ws.readyState === 1) ws.send(JSON.stringify({ type: "error", status: 500, error: { type: "server_error", message: error instanceof Error ? error.message : String(error) } }));
@@ -108,6 +116,7 @@ async function main() {
     if (!accessToken) throw new Error("CHATGPT_ACCESS_TOKEN is required. Use a ChatGPT/Codex OAuth access token.");
     const credentials = normalizeChatGPTCredentials({ accessToken, accountId: process.env.CHATGPT_ACCOUNT_ID, userAgent: process.env.CHATGPT_USER_AGENT });
     console.log(`[WebAI2API ChatGPT] Account ID: ${credentials.accountId ? "detected" : "not detected"}`);
+    console.log(`[WebAI2API ChatGPT] Model: ${DEFAULT_MODEL}`);
     const client = new ChatGPTResponsesClient(credentials);
 
     const server = createServer((req, res) => {
@@ -115,7 +124,7 @@ async function main() {
         const url = new URL(req.url ?? "/", "http://127.0.0.1");
         if (!isAllowlistedClient(req)) { console.warn(`[HTTP] Forbidden client: ${req.socket.remoteAddress}`); sendJson(res, 403, errorResponse("Forbidden: client IP is not in allowlist.", 403, "forbidden")); return; }
         if (method === "OPTIONS") { res.writeHead(204, { ...corsHeaders(res), "Access-Control-Allow-Headers": "content-type, authorization, x-requested-with", "Access-Control-Allow-Methods": "GET,POST,OPTIONS" }); res.end(); return; }
-        if (method === "GET" && url.pathname === "/health") { console.log("[HTTP] GET /health"); sendJson(res, 200, { ok: true, provider: "chatgpt" }); return; }
+        if (method === "GET" && url.pathname === "/health") { console.log("[HTTP] GET /health"); sendJson(res, 200, { ok: true, provider: "chatgpt", model: DEFAULT_MODEL }); return; }
         if (method === "GET" && url.pathname === "/v1/models") { console.log("[HTTP] GET /v1/models"); void client.listModels().then(models => sendJson(res, 200, { object: "list", data: (models.length ? models : [{ id: DEFAULT_MODEL }]).map((m: any) => ({ id: m.id || m.slug || m.model, object: "model", created: m.created || 0, owned_by: "openai" })) })).catch(error => { console.error(`[HTTP] /v1/models error: ${error.message}`); sendJson(res, 500, errorResponse(String(error), 500, "server_error")); }); return; }
         if (method === "POST" && url.pathname === "/v1/responses") { void handleResponses(req, res, client); return; }
         console.log(`[HTTP] 404 ${method} ${url.pathname}`);
