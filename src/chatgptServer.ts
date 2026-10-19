@@ -109,6 +109,8 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesCli
 
     let upstream: WebSocket | undefined;
     let connecting: Promise<WebSocket> | undefined;
+    let lastForwardedType = "<none>";
+    let receivedUpstreamMessage = false;
 
     const getUpstream = async () => {
         if (upstream && upstream.readyState === 1) return upstream;
@@ -117,14 +119,21 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesCli
                 upstream = socket;
                 connecting = undefined;
                 socket.on("message", data => {
-                    if (ws.readyState === 1) ws.send(data.toString());
+                    const payload = data.toString();
+                    if (!receivedUpstreamMessage) {
+                        receivedUpstreamMessage = true;
+                        let eventType = "non-json";
+                        try { eventType = String((JSON.parse(payload) as any)?.type || "json-without-type"); } catch { }
+                        console.log(`[Upstream WS] First message received: type=${eventType} bytes=${Buffer.byteLength(payload)}`);
+                    }
+                    if (ws.readyState === 1) ws.send(payload);
                 });
                 socket.on("close", (code, reason) => {
-                    console.log(`[Local WS] Upstream closed: ${code} ${reason.toString()}`);
+                    console.log(`[Local WS] Upstream closed: code=${code} reason=${JSON.stringify(reason.toString())} receivedMessage=${receivedUpstreamMessage} lastSentType=${lastForwardedType}`);
                     upstream = undefined;
                     if (ws.readyState === 1) ws.close(code || 1000, reason.toString());
                 });
-                socket.on("error", error => console.error(`[Local WS] Upstream error: ${error.message}`));
+                socket.on("error", error => console.error(`[Local WS] Upstream error: name=${error.name} message=${JSON.stringify(error.message)} code=${(error as NodeJS.ErrnoException).code || "<none>"}`));
                 return socket;
             }).catch(error => {
                 connecting = undefined;
@@ -153,7 +162,8 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTResponsesCli
             if (socket.readyState !== 1) throw new Error(`Upstream WebSocket is not open (state=${socket.readyState}).`);
             const outgoing = message.type === "response.create" ? { ...message, model: normalizeModel(message.model) } : message;
             socket.send(JSON.stringify(outgoing));
-            console.log(`[Upstream WS] -> ${message.type || "unknown"}${message.type === "response.create" ? ` model=${normalizeModel(message.model)}` : ""}`);
+            lastForwardedType = String(message.type || "unknown");
+            console.log(`[Upstream WS] -> ${lastForwardedType}${message.type === "response.create" ? ` model=${normalizeModel(message.model)}` : ""}`);
         } catch (error) {
             console.error(`[Local WS] Error: ${error instanceof Error ? error.message : String(error)}`);
             if (ws.readyState === 1) ws.send(JSON.stringify({ type: "error", status: 500, error: { type: "server_error", message: error instanceof Error ? error.message : String(error) } }));
