@@ -95,6 +95,12 @@ export class ChatGPTResponsesClient {
         headers["session-id"] = sessionId;
         headers.thread_id = threadId;
         headers["thread-id"] = threadId;
+        // Codex may bind the WebSocket to a specific turn during the handshake.
+        // Forward the caller's turn ID when available rather than only logging it.
+        if (metadata.turnId) {
+            headers.turn_id = metadata.turnId;
+            headers["turn-id"] = metadata.turnId;
+        }
         headers["x-codex-window-id"] = windowId;
         if (metadata.turnMetadata) headers["x-codex-turn-metadata"] = metadata.turnMetadata;
         return headers;
@@ -126,7 +132,7 @@ export class ChatGPTResponsesClient {
         const wsUrl = `${this.baseUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}/responses`;
         const headers = this.websocketHeaders(metadata);
         console.log(`[ChatGPT] Connecting upstream WebSocket: ${wsUrl}`);
-        console.log(`[ChatGPT] Handshake metadata: session=${metadata.sessionId ? "yes" : "generated"} thread=${metadata.threadId ? "yes" : "generated"} window=${metadata.windowId ? "yes" : "generated"} version=${headers.Version}`);
+        console.log(`[ChatGPT] Handshake metadata: session=${metadata.sessionId ? "yes" : "generated"} thread=${metadata.threadId ? "yes" : "generated"} turn=${metadata.turnId ? "yes" : "no"} window=${metadata.windowId ? "yes" : "generated"} turnMetadata=${metadata.turnMetadata ? "yes" : "no"} version=${headers.Version}`);
         return await new Promise<WebSocket>((resolve, reject) => {
             const ws = new WebSocket(wsUrl, { headers });
             let settled = false;
