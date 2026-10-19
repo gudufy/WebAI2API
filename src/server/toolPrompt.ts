@@ -522,6 +522,13 @@ export class ToolCallParser {
     // 这里是非流式解析入口：调用方必须先拿到 DeepSeek 的完整 RESPONSE 文本，
     // 再一次性提取工具调用，避免模型中途输出任何 wrapper 都影响 Codex 生命周期。
     static parseToolCalls(responseContent: string, tools?: ToolDescription[]): parsedToolCall[] {
+        // 模型有时会把协议标签写成转义形式 \\<tool_call>。只规范化工具调用外层起始标签，
+        // 并用空格替换反斜杠保持字符串长度不变，保证 start/raw 仍对应原始响应位置。
+        // 不触碰参数区，避免修改 PowerShell、shell 或 JSON 字符串中的合法反斜杠。
+        responseContent = responseContent.replace(
+            /\\(?=<(?:tool_call|tool_use|call_exec|call_call|function_call|tool)>)/gi,
+            ' '
+        );
         const results: parsedToolCall[] = [];
 
         // 这里故意只对“完整 RESPONSE”做解析，不依赖流式状态。
