@@ -77,7 +77,7 @@ test("parses multiple DSML invokes from a complete response", () => {
 test("parses escaped outer tool-call tags without changing command arguments", () => {
     const command = String.raw`Get-ChildItem -Force | Select-Object Mode,Name; Write-Output "C:\\Temp"`;
     const response = String.raw`I'll inspect the folder.
-\\<tool_call>exec_command<params>{"cmd":${JSON.stringify(command)}}</params></tool_call>
+\<tool_call>exec_command<params>{"cmd":${JSON.stringify(command)}}</params></tool_call>
 `;
     const calls = ToolCallParser.extractFromCompleteResponse(response, tools);
 
@@ -90,7 +90,7 @@ test("parses escaped outer tool-call tags without changing command arguments", (
 test("parses multiple mixed-format calls with repeated trailing tags", () => {
     const response = [
         "Checking the repository.",
-        String.raw`\\<tool_call>exec_command<params>{"cmd":"Get-ChildItem -Force | Select-Object Mode,Name"}</params></tool_call>`,
+        String.raw`\<tool_call>exec_command<params>{"cmd":"Get-ChildItem -Force | Select-Object Mode,Name"}</params></tool_call>`,
         "I found the files.",
         String.raw`<｜DSML｜ calls>`,
         String.raw`<｜｜DSML｜｜ invoke name="exec_command">`,
