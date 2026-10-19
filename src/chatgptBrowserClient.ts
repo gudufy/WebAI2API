@@ -45,7 +45,18 @@ function textOf(value: unknown): string {
 }
 
 function inputToPrompt(input: unknown[]): string {
-    return input.map((entry, index) => {
+    // The browser page already holds conversation history. Avoid replaying previous turns
+    // when Codex supplies the complete Responses input on each request.
+    let lastUser = -1;
+    for (let i = 0; i < input.length; i += 1) {
+        const item = input[i] as any;
+        if (item && typeof item === "object" && item.role === "user" && item.type !== "function_call_output") lastUser = i;
+    }
+    const selected = input.filter((entry, index) => {
+        const item = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+        return index >= lastUser || item.role === "system" || item.role === "developer";
+    });
+    return selected.map(entry => {
         if (typeof entry === "string") return entry;
         if (!entry || typeof entry !== "object") return String(entry ?? "");
         const item = entry as Record<string, unknown>;
@@ -55,7 +66,7 @@ ${textOf(item.output) || JSON.stringify(item.output ?? "")}`;
         }
         const role = typeof item.role === "string" ? item.role : String(item.type || "message");
         const content = textOf(item.content ?? item.text ?? item.input);
-        if (role === "assistant" && item.type === "function_call") {
+        if (item.type === "function_call") {
             return `[Previous tool call: ${String(item.name || "tool")}]
 ${String(item.arguments || "")}`;
         }
@@ -192,8 +203,6 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
         await sendButton.click();
 
         send({ type: "response.created", sequence_number: 0, response: { id: responseId, object: "response", created_at: now, status: "in_progress", model: request.model, output: [] } });
-        send({ type: "response.output_item.added", sequence_number: 1, output_index: 0, item: { id: outputItemId, type: "message", role: "assistant", status: "in_progress", content: [] } });
-        send({ type: "response.content_part.added", sequence_number: 2, item_id: outputItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
 
         let previous = "";
         let stableSince = Date.now();
@@ -207,7 +216,10 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
             if (text && text !== previous) {
                 sawNewAssistant = true;
                 const delta = text.startsWith(previous) ? text.slice(previous.length) : text;
-                if (delta) send({ type: "response.output_text.delta", sequence_number: 3, item_id: outputItemId, output_index: 0, content_index: 0, delta });
+                // Buffer tool-enabled output until its Responses item type is known.
+                if (!tools.length && delta) {
+                    send({ type: "response.output_text.delta", sequence_number: 3, item_id: outputItemId, output_index: 0, content_index: 0, delta });
+                }
                 previous = text;
                 stableSince = Date.now();
             }
@@ -223,13 +235,17 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
         if (functionCall && tools.some((tool: any) => tool.name === functionCall.name || tool.function?.name === functionCall.name)) {
             const callId = id("call");
             const item = { id: callId, call_id: callId, type: "function_call", name: functionCall.name, arguments: JSON.stringify(functionCall.arguments), status: "completed" };
-            send({ type: "response.output_item.done", sequence_number: 4, output_index: 0, item });
+            send({ type: "response.output_item.added", sequence_number: 1, output_index: 0, item: { ...item, status: "in_progress" } });
+            send({ type: "response.output_item.done", sequence_number: 2, output_index: 0, item });
             output = [item];
         } else {
             const item = {
                 id: outputItemId, type: "message", role: "assistant", status: "completed",
                 content: [{ type: "output_text", text: previous, annotations: [] }],
             };
+            send({ type: "response.output_item.added", sequence_number: 1, output_index: 0, item: { ...item, status: "in_progress", content: [] } });
+            send({ type: "response.content_part.added", sequence_number: 2, item_id: outputItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+            if (tools.length && previous) send({ type: "response.output_text.delta", sequence_number: 3, item_id: outputItemId, output_index: 0, content_index: 0, delta: previous });
             send({ type: "response.content_part.done", sequence_number: 4, item_id: outputItemId, output_index: 0, content_index: 0, part: item.content[0] });
             send({ type: "response.output_item.done", sequence_number: 5, output_index: 0, item });
             output = [item];
