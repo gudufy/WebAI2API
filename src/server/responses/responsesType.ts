@@ -204,7 +204,6 @@ export function normalizeResponsesRequest(
         description: tool.description,
         parameters: tool.parameters,
     } as ToolDescription));
-    const cachedToolFingerprint = sessionId ? responseSessionToolFingerprints.get(sessionId) : undefined;
     const cachedToolConfig = sessionId ? responseSessionToolConfigs.get(sessionId) : undefined;
     // Codex 后续请求可能省略 tools；这种情况下复用本会话缓存的工具定义。
     // 但每一轮都必须重新注入工具协议，不能假设 DeepSeek 网页端会始终记住上一轮的格式要求。
@@ -214,7 +213,6 @@ export function normalizeResponsesRequest(
     const effectiveToolChoice = x.tools === undefined && cachedToolConfig
         ? cachedToolConfig.toolChoice
         : x.tool_choice;
-    const toolFingerprint = getToolFingerprint(effectiveToolChoice, effectiveTools);
     // 保留指纹缓存用于会话工具配置管理，但不再用它跳过每轮的格式提示词。
     const toolprompt = buildToolPrompt(effectiveToolChoice, effectiveTools);
     const instructions = x.instructions ? `[system]:\n${x.instructions}` : '';
