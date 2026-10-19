@@ -123,6 +123,31 @@ pnpm run server -p 8787 --credentials="..." --browser --user-data-dir="..."
 - 工具调用的id就是源码。返回调用结果时会将id和结果一起输出，这样AI就知道清晰的对应关系了
 
 
+## ChatGPT 网页模式（Codex Responses）
+
+`server-chatgpt` 现在可以通过 Playwright 控制已登录的 ChatGPT 网页，不再要求 `CHATGPT_ACCESS_TOKEN`，也不连接 ChatGPT 上游 WebSocket。它仍在本地提供 `/v1/responses` 和 Codex WebSocket 入口。
+
+**前提：浏览器必须开启 CDP 远程调试端口。** 普通已打开但没有开启远程调试的 Edge/Chrome 无法被外部程序附加。建议用单独的浏览器配置目录，首次登录一次 ChatGPT，之后复用该登录状态。
+
+Windows 示例（先关闭使用同一调试端口的浏览器实例）：
+
+```powershell
+& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\WebAI2API\ChatGPTProfile"
+```
+
+在弹出的 Edge 中登录 https://chatgpt.com，然后保持浏览器运行。启动服务：
+
+```powershell
+$env:CHATGPT_CDP_URL = "http://127.0.0.1:9222"
+pnpm run server-chatgpt
+```
+
+如 CDP 使用其他端口，修改 `CHATGPT_CDP_URL`。Codex 本地配置仍指向 `http://localhost:8787/v1`，并可设置 `supports_websockets = true`；这个 WebSocket 只连接本地服务，上游推理由网页完成。
+
+兼容性说明：普通文本可增量流式返回；浏览器会话按 Codex `thread_id` 复用。工具调用通过提示词约定的 JSON 格式识别并转换为 Responses `function_call`，属于网页交互适配，并非 ChatGPT 网页原生工具接口。图片/文件上传、取消生成以及所有 Responses API 字段并不能保证与官方 API 完全一致。请先用简单文本请求验证，再测试工具调用。
+
+---
+
 ## 接入 Coding Agent
 ### CodeX
 CodeX配置如下：
