@@ -114,10 +114,9 @@ export class ChatGPTBrowserClient {
         if (!this.context) throw new Error("No browser context found on the CDP connection.");
         const existing = this.context.pages().find(page => page.url().includes("chatgpt.com"));
         if (existing) {
-            this.pages.set(this.defaultThread, existing);
-            console.log("[ChatGPT Browser] Reusing existing ChatGPT tab from the logged-in browser.");
+            console.log("[ChatGPT Browser] Detected an existing ChatGPT tab; new Codex threads will use separate tabs in the same logged-in browser context.");
         } else {
-            console.log("[ChatGPT Browser] Connected to browser; will open ChatGPT in a tab using the existing login.");
+            console.log("[ChatGPT Browser] Connected to browser; will open ChatGPT tabs using the existing login state.");
         }
         console.log(`[ChatGPT Browser] CDP connected: ${this.cdpUrl}`);
     }
@@ -128,11 +127,10 @@ export class ChatGPTBrowserClient {
         let page = this.pages.get(key);
         if (page && !page.isClosed()) return page;
         const context = this.context!;
-        const reuseExistingTab = key === this.defaultThread || !this.firstThreadId;
         if (key !== this.defaultThread && !this.firstThreadId) this.firstThreadId = key;
-        page = reuseExistingTab
-            ? (context.pages().find(p => p.url().includes("chatgpt.com")) ?? await context.newPage())
-            : await context.newPage();
+        // Keep the user's manually open ChatGPT tab untouched. Each Codex thread gets
+        // its own new tab while sharing the authenticated CDP browser context/cookies.
+        page = await context.newPage();
         this.pages.set(key, page);
         if (!page.url().includes("chatgpt.com")) {
             await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60000 });
