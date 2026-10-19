@@ -195,13 +195,13 @@ function buildPrompt(messages: ChatCompletionMessageParam[]): string {
     return lines.join("\n\n");
 }
 
-export function message2CompletionsMessage(msg: string, matchTool = false): ChatCompletionAssistantMessageParam {
+export function message2CompletionsMessage(msg: string, matchTool = false, tools?: ToolDescription[]): ChatCompletionAssistantMessageParam {
     const message: ChatCompletionAssistantMessageParam = {
         role: 'assistant',
         content: msg,
     };
     if (matchTool) {
-        const toolCalls = ToolCallParser.parseToolCalls(msg);
+        const toolCalls = ToolCallParser.parseToolCalls(msg, tools);
 
         if (toolCalls.length > 0) {
             message.tool_calls = toolCalls.map(call => ({
