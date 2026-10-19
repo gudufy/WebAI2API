@@ -213,7 +213,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, client
         // 一次性解析完
         const parsed = await parseResultFromStream(runResult.body, undefined, streamOptions);
         const id = buildResponseId(requestId, parsed.messageId);
-        const output = message2ResponsesOutput(parsed.text, id, useTool, rawInput.tools?.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })));
+        const output = message2ResponsesOutput(parsed.text, id, useTool, toolSchemas);
         if (parsed.thinking.trim()) {   // 添加思考字段
             output.push({
                 type: 'reasoning',
