@@ -9,7 +9,7 @@
     "server": "node --import tsx src/server/server.ts",
     "server-chatgpt": "node --import tsx src/chatgptServer.ts",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/server/toolPrompt.test.ts"
+    "test": "node --import tsx --test src/server/toolPrompt.test.ts src/chatgptResponseStream.test.ts"
   },
   "dependencies": {
     "jsonrepair": "^3.15.0",
