@@ -103,7 +103,6 @@ export class ChatGPTBrowserClient {
     private context?: BrowserContext;
     private readonly pages = new Map<string, Page>();
     private defaultThread = "default";
-    private firstThreadId?: string;
 
     constructor(private readonly cdpUrl = process.env.CHATGPT_CDP_URL || "http://127.0.0.1:9222") {}
 
@@ -127,7 +126,6 @@ export class ChatGPTBrowserClient {
         let page = this.pages.get(key);
         if (page && !page.isClosed()) return page;
         const context = this.context!;
-        if (key !== this.defaultThread && !this.firstThreadId) this.firstThreadId = key;
         // Keep the user's manually open ChatGPT tab untouched. Each Codex thread gets
         // its own new tab while sharing the authenticated CDP browser context/cookies.
         page = await context.newPage();
@@ -277,7 +275,7 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
     async close(): Promise<void> {
         // Do not close the user's browser. Only detach this CDP client.
         this.pages.clear();
-        this.browser?.disconnect();
+        await this.browser?.close();
         this.browser = undefined;
         this.context = undefined;
     }
