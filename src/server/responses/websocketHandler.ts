@@ -14,7 +14,7 @@ import { DeepSeekSessionError } from "../../deepseekBrowserClient.js";
 import { READY_RESPONSE_ID } from "./responsesType.js";
 import { streamEventsFromStream } from "./stream.js";
 import { clearResponseSessionState, enqueueDeepSeekRequest, rememberResponseSessionMessageId, resolveQueuedParentMessageId } from "./sessionQueue.js";
-import { clearResponseSessionTools, normalizeResponsesRequest, rememberResponseSessionTools } from "./responsesType.js";
+import { clearResponseSessionTools, getResponseSessionToolConfig, normalizeResponsesRequest, rememberResponseSessionTools } from "./responsesType.js";
 import { getInstallationSessionId, getResponseSessionId, isResponseSessionShared, isSessionReferencedByAnyKey, rememberInstallationSession, rememberResponseSession } from "./responseSessionRegistry.js";
 
 export interface WebSocketMessage {
@@ -341,15 +341,22 @@ export class WebSocketSessionManager {
                     return result;
                 });
 
-                rememberResponseSessionTools(runResult.sessionId, effectiveInput.tool_choice, effectiveInput.tools?.map(tool => ({
+                const cachedToolConfig = effectiveInput.tools === undefined
+                    ? getResponseSessionToolConfig(runResult.sessionId)
+                    : undefined;
+                const toolSchemas = effectiveInput.tools?.map(tool => ({
                     name: tool.name,
                     description: tool.description,
                     parameters: tool.parameters,
-                })));
+                })) ?? cachedToolConfig?.tools;
+                const toolChoice = cachedToolConfig?.toolChoice ?? effectiveInput.tool_choice;
+                if (effectiveInput.tools !== undefined) {
+                    rememberResponseSessionTools(runResult.sessionId, effectiveInput.tool_choice, toolSchemas);
+                }
 
                 const parsed = await streamEventsFromStream(
                     runResult.body,
-                    shouldParseToolCall(effectiveInput.tool_choice, effectiveInput.tools),
+                    shouldParseToolCall(toolChoice, toolSchemas),
                     runResult.sessionId,
                     modelConfig.model,
                     normalizeResponsesRequest(effectiveInput, runResult.sessionId).message.length,
@@ -364,11 +371,7 @@ export class WebSocketSessionManager {
                         ),
                         stopChat: messageId => this.client.stopChat({ sessionId: runResult.sessionId, messageId }),
                     },
-                    effectiveInput.tools?.map(tool => ({
-                        name: tool.name,
-                        description: tool.description,
-                        parameters: tool.parameters,
-                    })),
+                    toolSchemas,
                 );
                 rememberResponseSessionMessageId(runResult.sessionId, parsed.messageId);
                 this.lastInstructionMessageId = parsed.messageId ?? -114514;
