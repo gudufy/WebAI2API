@@ -86,18 +86,17 @@ export class ChatGPTResponsesClient {
         const headers = this.headers();
         delete headers["Content-Type"];
         delete headers.Accept;
+        const sessionId = metadata.sessionId || crypto.randomUUID();
+        const threadId = metadata.threadId || crypto.randomUUID();
+        const windowId = metadata.windowId || crypto.randomUUID();
 
         headers["Originator"] = "codex_cli_rs";
-        headers["Version"] = metadata.version || process.env.CHATGPT_CODEX_VERSION || "0.0.0";
-        if (metadata.sessionId) {
-            headers.session_id = metadata.sessionId;
-            headers["session-id"] = metadata.sessionId;
-        }
-        if (metadata.threadId) {
-            headers.thread_id = metadata.threadId;
-            headers["thread-id"] = metadata.threadId;
-        }
-        if (metadata.windowId) headers["x-codex-window-id"] = metadata.windowId;
+        headers["Version"] = metadata.version || process.env.CHATGPT_CODEX_VERSION || "0.148.0";
+        headers.session_id = sessionId;
+        headers["session-id"] = sessionId;
+        headers.thread_id = threadId;
+        headers["thread-id"] = threadId;
+        headers["x-codex-window-id"] = windowId;
         if (metadata.turnMetadata) headers["x-codex-turn-metadata"] = metadata.turnMetadata;
         return headers;
     }
@@ -128,7 +127,7 @@ export class ChatGPTResponsesClient {
         const wsUrl = `${this.baseUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}/responses`;
         const headers = this.websocketHeaders(metadata);
         console.log(`[ChatGPT] Connecting upstream WebSocket: ${wsUrl}`);
-        console.log(`[ChatGPT] Handshake metadata: session=${metadata.sessionId ? "yes" : "no"} thread=${metadata.threadId ? "yes" : "no"} window=${metadata.windowId ? "yes" : "no"} version=${headers.Version}`);
+        console.log(`[ChatGPT] Handshake metadata: session=yes thread=yes window=yes version=${headers.Version}`);
         return await new Promise<WebSocket>((resolve, reject) => {
             const ws = new WebSocket(wsUrl, { headers });
             let settled = false;
@@ -155,12 +154,8 @@ export class ChatGPTResponsesClient {
                 let body = "";
                 response.on("data", chunk => { body += String(chunk); });
                 response.on("end", () => {
-                    const headersText = Object.entries(response.headers)
-                        .filter(([name]) => /^(www-authenticate|x-request-id|x-ratelimit|cf-ray)$/i.test(name))
-                        .map(([name, value]) => `${name}=${Array.isArray(value) ? value.join(",") : value}`)
-                        .join(" ");
                     const detail = body.trim().replace(/\s+/g, " ").slice(0, 1000);
-                    reject(new Error(`ChatGPT WebSocket handshake failed: HTTP ${response.statusCode}${headersText ? ` ${headersText}` : ""}${detail ? ` ${detail}` : ""}`));
+                    reject(new Error(`ChatGPT WebSocket handshake failed: HTTP ${response.statusCode}${detail ? ` ${detail}` : ""}`));
                 });
             });
             ws.once("error", error => {
