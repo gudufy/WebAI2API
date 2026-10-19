@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "auth": "node --import tsx src/auth.ts",
-    "auth-chatgpt": "node --import tsx src/usage/auth_chatgpt.ts",
     "chat": "node --import tsx src/usage/chat.ts",
     "chat-browser": "node --import tsx src/usage/chat_browser.ts",
     "server": "node --import tsx src/server/server.ts",
