@@ -287,7 +287,8 @@ function decodeXmlText(value: string): string {
 function parseDsmlParameterValue(value: string, isString: boolean): unknown {
     // 若 DeepSeek 漏了 parameter 结束标签，后续参数/调用标签可能被吞进当前值。
     // 参数值一旦遇到这些协议边界，就只保留边界之前的内容；绝不把协议残片交给 shell。
-    const protocolBoundary = /<\s*\/?\s*(?:｜{0,2})?DSML(?:｜{0,2})?\s+(?:calls|invoke|parameter)\b[^>]*>/i;
+    // 包含无类型的裸结束标签 </｜｜DSML｜｜>；它不能进入参数值（例如 max_output_tokens）。
+    const protocolBoundary = /<\s*\/?\s*(?:｜{0,2})?DSML(?:｜{0,2})?(?:\s+(?:calls|invoke|parameter)\b[^>]*)?\s*>/i;
     const boundary = protocolBoundary.exec(value);
     const boundedValue = boundary ? value.slice(0, boundary.index) : value;
     const text = decodeXmlText(boundedValue).trim();
@@ -569,12 +570,16 @@ export class ToolCallParser {
                 dsmlParameterOpen.lastIndex = parameterClose.index + parameterClose[0].length;
             }
 
-            results.push({
-                tool,
-                parameters: buildDsmlParameters(parameters),
-                start: invokeMatch.index,
-                raw: normalizedResponse.slice(invokeMatch.index, closeMatch ? closeMatch.index + closeMatch[0].length : bodyEnd),
-            });
+            // 不要把未解析出任何参数的残缺 invoke 作为 {} 工具调用交给 Codex。
+            // 这类调用会触发 missing field 'cmd'，并可能导致客户端反复重试。
+            if (Object.keys(parameters).length > 0) {
+                results.push({
+                    tool,
+                    parameters: buildDsmlParameters(parameters),
+                    start: invokeMatch.index,
+                    raw: normalizedResponse.slice(invokeMatch.index, closeMatch ? closeMatch.index + closeMatch[0].length : bodyEnd),
+                });
+            }
         }
 
         // ---------- C. DeepSeek 原生“直接工具标签” ----------
