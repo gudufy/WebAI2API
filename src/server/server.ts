@@ -25,7 +25,7 @@ import { streamEventsFromStream as completionsSFS } from "./completions/stream.j
 import { asResponsesCreateRequest, estimateUsage, message2ResponsesOutput, normalizeResponsesRequest, ResponseOutputMessage, type ResponsesResponse, uploadFiles as resp_uploadFiles } from "./responses/responsesType.js";
 import { enqueueDeepSeekRequest, enqueueResponseSessionRequest, rememberResponseSessionMessageId, resolveQueuedParentMessageId } from "./responses/sessionQueue.js";
 import { shouldParseToolCall } from "./toolPrompt.js";
-import { rememberResponseSessionTools } from "./responses/responsesType.js";
+import { getResponseSessionToolConfig, rememberResponseSessionTools } from "./responses/responsesType.js";
 import { streamEventsFromStream } from "./responses/stream.js";
 import { WebSocketSessionManager } from "./responses/websocketHandler.js";
 
@@ -145,8 +145,17 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse, 
 
 async function handleResponses(req: IncomingMessage, res: ServerResponse, client: ServerClient) {
     const rawInput = asResponsesCreateRequest(await readRequestJson(req));
-    const useTool = shouldParseToolCall(rawInput.tool_choice, rawInput.tools);
     const normalized = normalizeResponsesRequest(rawInput);
+    const cachedToolConfig = rawInput.tools === undefined
+        ? getResponseSessionToolConfig(normalized.sessionId)
+        : undefined;
+    const toolChoice = cachedToolConfig?.toolChoice ?? rawInput.tool_choice;
+    const toolSchemas = rawInput.tools?.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+    })) ?? cachedToolConfig?.tools;
+    const useTool = shouldParseToolCall(toolChoice, toolSchemas);
     if (!normalized.message) {
         sendJson(res, 400, errorResponse("input must include at least one non-empty message."));
         return;
@@ -168,11 +177,13 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, client
             signal: abortController.signal,
         }));
         const requestId = sessionId = runResult.sessionId;
-        rememberResponseSessionTools(runResult.sessionId, rawInput.tool_choice, rawInput.tools?.map(tool => ({
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-        })));
+        if (rawInput.tools !== undefined) {
+            rememberResponseSessionTools(runResult.sessionId, rawInput.tool_choice, rawInput.tools.map(tool => ({
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+            })));
+        }
         const streamOptions = {
             signal: abortController.signal,
             continueChat: (messageId: number) => enqueueDeepSeekRequest(() => client.continueChat({ sessionId: requestId, messageId, signal: abortController.signal })),
@@ -192,7 +203,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, client
                     sendSseData(res, data);
                 },
                 streamOptions,
-                rawInput.tools?.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
+                toolSchemas,
             );
             rememberResponseSessionMessageId(requestId, parsed.messageId);
             sendSseDone(res);
