@@ -76,7 +76,7 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse, 
         if (!rawInput.stream) {
             const parsed = await parseResultFromStream(runResult.body, undefined, streamOptions);
             const thinking = parsed.thinking.trim();
-            const msg = message2CompletionsMessage(parsed.text, useTool);
+            const msg = message2CompletionsMessage(parsed.text, useTool, rawInput.tools?.filter(tool => tool.type === 'function').map(tool => tool.function as import('./toolPrompt.js').ToolDescription));
             if (thinking) {
                 msg.reasoning_content = thinking;
             }
@@ -113,6 +113,7 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse, 
                 sendSseData(res, data);
             },
             streamOptions,
+            rawInput.tools?.filter(tool => tool.type === 'function').map(tool => tool.function as import('./toolPrompt.js').ToolDescription),
         );
         sendSseDone(res);
     } catch (error) {
@@ -191,6 +192,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, client
                     sendSseData(res, data);
                 },
                 streamOptions,
+                rawInput.tools?.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
             );
             rememberResponseSessionMessageId(requestId, parsed.messageId);
             sendSseDone(res);
@@ -200,7 +202,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, client
         // 一次性解析完
         const parsed = await parseResultFromStream(runResult.body, undefined, streamOptions);
         const id = buildResponseId(requestId, parsed.messageId);
-        const output = message2ResponsesOutput(parsed.text, id, useTool);
+        const output = message2ResponsesOutput(parsed.text, id, useTool, rawInput.tools?.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })));
         if (parsed.thinking.trim()) {   // 添加思考字段
             output.push({
                 type: 'reasoning',
