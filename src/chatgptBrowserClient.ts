@@ -159,28 +159,42 @@ export class ChatGPTBrowserClient {
         // goto(domcontentloaded) above has already waited for the initial document.
         // Do not wait for another load-state here: Cloudflare interstitials can keep
         // the page in a navigation state and make the request look permanently hung.
-        const currentUrl = page.url();
+        let currentUrl = page.url();
         console.log(`[ChatGPT Browser] Checking initial URL before waiting for page state; url=${currentUrl}`);
-        // Cloudflare may append __cf_chl_rt_tk to the URL even after redirecting
-        // to the real app. Do not treat that query parameter alone as proof of a
-        // challenge; inspect the document title/body and challenge-specific paths.
-        const challengePath = /\/cdn-cgi\/|challenge-platform/i.test(new URL(currentUrl).pathname);
-        console.log(`[ChatGPT Browser] Initial challenge-path check complete; challengePath=${challengePath}`);
-        const title = await Promise.race([
-            page.title().catch(() => ""),
-            new Promise<string>(resolve => setTimeout(() => resolve("(title lookup timed out)"), 3000)),
-        ]);
-        const pageState = await Promise.race([
-            page.evaluate(() => ({
+        const inspectPage = async () => {
+            const url = page.url();
+            const challengePath = /\/cdn-cgi\/|challenge-platform/i.test(new URL(url).pathname);
+            const title = await page.title().catch(() => "");
+            const pageState = await page.evaluate(() => ({
                 bodyText: (document.body?.innerText || "").slice(0, 1000),
                 readyState: document.readyState,
-            })).catch(error => ({ bodyText: `(page inspection failed: ${String(error)} )`, readyState: "unknown" })),
-            new Promise<{ bodyText: string; readyState: string }>(resolve =>
-                setTimeout(() => resolve({ bodyText: "(page inspection timed out)", readyState: "unknown" }), 3000)),
-        ]);
-        console.log(`[ChatGPT Browser] Page state inspected; url=${page.url()}; title=${title}; readyState=${pageState.readyState}; bodyPreview=${JSON.stringify(pageState.bodyText.slice(0, 300))}`);
-        if (challengePath || /just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(title + " " + pageState.bodyText)) {
-            throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification in the Edge window, then retry.");
+            })).catch(error => ({ bodyText: `(page inspection failed: ${String(error)})`, readyState: "unknown" }));
+            const challenge = challengePath || /just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(title + " " + pageState.bodyText);
+            return { url, title, pageState, challenge };
+        };
+        let inspected = await inspectPage();
+        console.log(`[ChatGPT Browser] Page state inspected; url=${inspected.url}; title=${inspected.title}; readyState=${inspected.pageState.readyState}; bodyPreview=${JSON.stringify(inspected.pageState.bodyText.slice(0, 300))}`);
+        if (inspected.challenge) {
+            console.warn("[ChatGPT Browser] Cloudflare challenge detected; waiting up to 90 seconds for the browser page to clear. If a verification prompt appears, complete it in the Edge window.");
+            const deadline = Date.now() + 90000;
+            let lastProgress = 0;
+            while (Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                inspected = await inspectPage();
+                currentUrl = inspected.url;
+                if (!inspected.challenge && inspected.pageState.bodyText.trim()) {
+                    console.log(`[ChatGPT Browser] Challenge cleared; url=${inspected.url}; title=${inspected.title}; readyState=${inspected.pageState.readyState}; bodyPreview=${JSON.stringify(inspected.pageState.bodyText.slice(0, 200))}`);
+                    break;
+                }
+                const elapsed = Math.floor((Date.now() - (deadline - 90000)) / 1000);
+                if (elapsed - lastProgress >= 10) {
+                    lastProgress = elapsed;
+                    console.log(`[ChatGPT Browser] Still waiting for Cloudflare challenge (${elapsed}/90s); url=${inspected.url}; title=${inspected.title}; bodyChars=${inspected.pageState.bodyText.length}`);
+                }
+            }
+            if (inspected.challenge || !inspected.pageState.bodyText.trim()) {
+                throw new Error("ChatGPT remained on the Cloudflare “请稍候…” page for 90 seconds (title=" + inspected.title + ", bodyChars=" + inspected.pageState.bodyText.length + "). This is a browser/network verification issue, not a prompt-editor selector issue. Open the WebAI2API Edge window and check whether the page can finish loading manually.");
+            }
         }
         const loginRequired = await page.locator('input[name="email"], input[type="password"]').count().catch(() => 0);
         if (loginRequired || /\/auth\/login|\/log-in/.test(currentUrl)) {
