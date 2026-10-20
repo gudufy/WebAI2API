@@ -172,7 +172,7 @@ export class ChatGPTBrowserClient {
                 setTimeout(() => resolve({ bodyText: "(page inspection timed out)", readyState: "unknown" }), 3000)),
         ]);
         console.log(`[ChatGPT Browser] Page state inspected; url=${page.url()}; title=${title}; readyState=${pageState.readyState}; bodyPreview=${JSON.stringify(pageState.bodyText.slice(0, 300))}`);
-        if (challengePath || /just a moment|verify you are human|checking your browser|cloudflare/i.test(title + " " + pageState.bodyText)) {
+        if (challengePath || /just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(title + " " + pageState.bodyText)) {
             throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification in the Edge window, then retry.");
         }
         const loginRequired = await page.locator('input[name="email"], input[type="password"]').count().catch(() => 0);
