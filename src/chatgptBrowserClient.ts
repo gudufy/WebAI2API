@@ -127,7 +127,7 @@ export class ChatGPTBrowserClient {
         const key = threadId || this.defaultThread;
         const context = this.context!;
         const isChatGPTPage = (candidate: Page) => {
-            try { return /(^|\\.)chatgpt\\.com$/i.test(new URL(candidate.url()).hostname); }
+            try { return /(^|\.)chatgpt\.com$/i.test(new URL(candidate.url()).hostname); }
             catch { return false; }
         };
         const pageLooksReady = async (candidate: Page): Promise<boolean> => {
@@ -144,6 +144,7 @@ export class ChatGPTBrowserClient {
         };
         const cached = this.pages.get(key);
         const openPages = context.pages().filter(candidate => !candidate.isClosed() && isChatGPTPage(candidate));
+        console.log(`[ChatGPT Browser] CDP tabs: ${JSON.stringify(context.pages().map((candidate, index) => ({ index, url: candidate.url(), closed: candidate.isClosed() })))}`);
         // CDP can expose multiple ChatGPT tabs. Do not blindly reuse the first tab:
         // an older hidden tab may remain on Cloudflare while the visible tab works.
         // Prefer the cached tab only if it is healthy; otherwise scan newest tabs first.
