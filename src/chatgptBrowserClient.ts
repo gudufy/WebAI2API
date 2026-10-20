@@ -294,15 +294,47 @@ ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, rep
         // ChatGPT has used several editor DOMs, including a ProseMirror textbox with
         // a localized aria-label (e.g. "询问 ChatGPT"). Include these selectors rather
         // than waiting forever on the older #prompt-textarea/data-placeholder DOM.
+        // Apply :visible to EACH selector before combining them. Applying .last()
+        // to an unfiltered selector list can select a hidden legacy textarea that
+        // appears later in the DOM than ChatGPT's real contenteditable composer.
         const editor = page.locator(
-            '#prompt-textarea, textarea[placeholder], ' +
-            '[contenteditable="true"][data-placeholder], ' +
-            '[contenteditable="true"][aria-label], ' +
-            'div.ProseMirror[contenteditable="true"], ' +
-            '[role="textbox"][contenteditable="true"]'
+            '#prompt-textarea:visible, textarea[placeholder]:visible, ' +
+            '[contenteditable="true"][data-placeholder]:visible, ' +
+            '[contenteditable="true"][aria-label]:visible, ' +
+            'div.ProseMirror[contenteditable="true"]:visible, ' +
+            '[role="textbox"][contenteditable="true"]:visible'
         ).last();
         console.log("[ChatGPT Browser] Locating visible prompt editor.");
-        await editor.waitFor({ state: "visible", timeout: 20000 });
+        try {
+            await editor.waitFor({ state: "visible", timeout: 12000 });
+        } catch (error) {
+            const diagnostics = await page.evaluate(() => {
+                const selectors = [
+                    '#prompt-textarea', 'textarea[placeholder]',
+                    '[contenteditable="true"][data-placeholder]',
+                    '[contenteditable="true"][aria-label]',
+                    'div.ProseMirror[contenteditable="true"]',
+                    '[role="textbox"][contenteditable="true"]',
+                ];
+                return {
+                    url: location.href,
+                    title: document.title,
+                    readyState: document.readyState,
+                    bodyText: (document.body?.innerText || "").slice(0, 1200),
+                    candidates: selectors.map(selector => ({
+                        selector,
+                        count: document.querySelectorAll(selector).length,
+                        visible: [...document.querySelectorAll(selector)].filter(el => {
+                            const rect = el.getBoundingClientRect();
+                            const style = getComputedStyle(el);
+                            return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                        }).length,
+                    })),
+                };
+            }).catch(() => ({ url: page.url(), title: "(diagnostics unavailable)" }));
+            console.error(`[ChatGPT Browser] Prompt editor not found within 12 seconds; diagnostics=${JSON.stringify(diagnostics)}`);
+            throw new Error(`Could not find a visible ChatGPT prompt editor. Check that ChatGPT finished loading and is logged in. Page: ${page.url()}`);
+        }
         const editorInfo = await editor.evaluate(element => ({
             tag: element.tagName,
             role: element.getAttribute("role"),
