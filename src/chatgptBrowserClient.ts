@@ -185,6 +185,19 @@ export class ChatGPTBrowserClient {
         let sequenceNumber = 0;
         const send = (event: ResponseEvent) => controller.enqueue(sse({ ...event, sequence_number: sequenceNumber++ }));
         const now = Math.floor(Date.now() / 1000);
+        if (request.generate === false || !Array.isArray(request.input) || request.input.length === 0) {
+            send({ type: "response.created", response: { id: responseId, object: "response", created_at: now, status: "in_progress", model: request.model, output: [] } });
+            send({
+                type: "response.completed",
+                response: {
+                    id: responseId, object: "response", created_at: now, completed_at: now,
+                    status: "completed", model: request.model, output: [],
+                    output_text: "", usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+                },
+            });
+            controller.close();
+            return;
+        }
         const outputItemId = id("msg");
         const outputTextId = id("part");
         const tools = Array.isArray(request.tools) ? request.tools.filter((t: any) => t && (t.type === "function" || t.name)) : [];
