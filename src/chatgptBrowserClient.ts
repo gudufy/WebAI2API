@@ -102,6 +102,7 @@ export class ChatGPTBrowserClient {
     private browser?: Browser;
     private context?: BrowserContext;
     private readonly pages = new Map<string, Page>();
+    private readonly threadQueues = new Map<string, Promise<void>>();
     private defaultThread = "default";
 
     constructor(private readonly cdpUrl = process.env.CHATGPT_CDP_URL || "http://127.0.0.1:9222") {}
@@ -236,7 +237,8 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
                 previous = text;
                 stableSince = Date.now();
             }
-            const stopVisible = await page.locator('button[data-testid="stop-button"], button[aria-label*="Stop generating"]').count().catch(() => 0) > 0;
+            const stopButton = page.locator('button[data-testid="stop-button"], button[aria-label*="Stop generating"]').last();
+            const stopVisible = await stopButton.isVisible().catch(() => false);
             if (sawNewAssistant && !stopVisible && Date.now() - stableSince > 1300) break;
             await new Promise(resolve => setTimeout(resolve, 180));
         }
@@ -248,8 +250,12 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
         if (functionCall && tools.some((tool: any) => tool.name === functionCall.name || tool.function?.name === functionCall.name)) {
             const callId = id("call");
             const item = { id: callId, call_id: callId, type: "function_call", name: functionCall.name, arguments: JSON.stringify(functionCall.arguments), status: "completed" };
-            send({ type: "response.output_item.added", sequence_number: 1, output_index: 0, item: { ...item, status: "in_progress" } });
-            send({ type: "response.output_item.done", sequence_number: 2, output_index: 0, item });
+            send({ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress" } });
+            if (item.arguments) {
+                send({ type: "response.function_call_arguments.delta", item_id: callId, output_index: 0, delta: item.arguments });
+                send({ type: "response.function_call_arguments.done", item_id: callId, output_index: 0, arguments: item.arguments });
+            }
+            send({ type: "response.output_item.done", output_index: 0, item });
             output = [item];
         } else {
             const item = {
@@ -261,8 +267,9 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
                 send({ type: "response.content_part.added", item_id: outputItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
                 if (previous) send({ type: "response.output_text.delta", item_id: outputItemId, output_index: 0, content_index: 0, delta: previous });
             }
-            send({ type: "response.content_part.done", sequence_number: 4, item_id: outputItemId, output_index: 0, content_index: 0, part: item.content[0] });
-            send({ type: "response.output_item.done", sequence_number: 5, output_index: 0, item });
+            send({ type: "response.output_text.done", item_id: outputItemId, output_index: 0, content_index: 0, text: previous });
+            send({ type: "response.content_part.done", item_id: outputItemId, output_index: 0, content_index: 0, part: item.content[0] });
+            send({ type: "response.output_item.done", output_index: 0, item });
             output = [item];
         }
         send({
@@ -281,6 +288,7 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
     async close(): Promise<void> {
         // Do not close the user's browser. Only detach this CDP client.
         this.pages.clear();
+        this.threadQueues.clear();
         await this.browser?.close();
         this.browser = undefined;
         this.context = undefined;
