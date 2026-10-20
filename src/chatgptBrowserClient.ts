@@ -160,7 +160,7 @@ export class ChatGPTBrowserClient {
             throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification there, then retry.");
         }
         const loginRequired = await page.locator('input[name="email"], input[type="password"]').count().catch(() => 0);
-        if (loginRequired || /\\/auth\\/login|\\/log-in/.test(currentUrl)) {
+        if (loginRequired || /\/auth\/login|\/log-in/.test(currentUrl)) {
             throw new Error("ChatGPT is not logged in in the connected browser. Log in to chatgpt.com and retry.");
         }
         return page;
