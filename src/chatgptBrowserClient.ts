@@ -125,16 +125,40 @@ export class ChatGPTBrowserClient {
     private async pageFor(threadId: string): Promise<Page> {
         await this.connect();
         const key = threadId || this.defaultThread;
-        let page = this.pages.get(key);
-        if (page && !page.isClosed()) return page;
         const context = this.context!;
-        // Prefer an already-open ChatGPT tab: the user has confirmed that manual
-        // browsing works, while a fresh tab is repeatedly challenged by Cloudflare.
-        // Reusing the existing tab also preserves its live page/session state rather
-        // than relying only on shared cookies. If no ChatGPT tab exists, create one.
-        page = context.pages().find(candidate => !candidate.isClosed() && /(^|\.)chatgpt\.com$/i.test(new URL(candidate.url()).hostname));
+        const isChatGPTPage = (candidate: Page) => {
+            try { return /(^|\\.)chatgpt\\.com$/i.test(new URL(candidate.url()).hostname); }
+            catch { return false; }
+        };
+        const pageLooksReady = async (candidate: Page): Promise<boolean> => {
+            try {
+                const title = await candidate.title();
+                const state = await candidate.evaluate(() => ({
+                    bodyText: document.body?.innerText || "",
+                    hasComposer: Boolean(document.querySelector("#prompt-textarea, [contenteditable=\"true\"], textarea[placeholder]")),
+                }));
+                const challenge = /just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(title + " " + state.bodyText)
+                    || /\\/cdn-cgi\\/|challenge-platform/i.test(new URL(candidate.url()).pathname);
+                return !challenge && (state.hasComposer || state.bodyText.trim().length > 0);
+            } catch { return false; }
+        };
+        const cached = this.pages.get(key);
+        const openPages = context.pages().filter(candidate => !candidate.isClosed() && isChatGPTPage(candidate));
+        // CDP can expose multiple ChatGPT tabs. Do not blindly reuse the first tab:
+        // an older hidden tab may remain on Cloudflare while the visible tab works.
+        // Prefer the cached tab only if it is healthy; otherwise scan newest tabs first.
+        let page: Page | undefined;
+        if (cached && !cached.isClosed() && isChatGPTPage(cached) && await pageLooksReady(cached)) {
+            page = cached;
+        } else {
+            for (const candidate of [...openPages].reverse()) {
+                if (await pageLooksReady(candidate)) { page = candidate; break; }
+            }
+        }
+        if (!page && cached && !cached.isClosed() && isChatGPTPage(cached)) page = cached;
+        if (!page && openPages.length) page = openPages[openPages.length - 1];
         if (page) {
-            console.log(`[ChatGPT Browser] Reusing existing ChatGPT tab for thread ${key}; url=${page.url()}.`);
+            console.log(`[ChatGPT Browser] Selected ChatGPT tab for thread ${key}; url=${page.url()}; healthy=${await pageLooksReady(page)}; openChatGPTTabs=${openPages.length}.`);
         } else {
             console.log(`[ChatGPT Browser] No existing ChatGPT tab found; creating browser tab for thread ${key}.`);
             page = await context.newPage();
