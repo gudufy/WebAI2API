@@ -151,16 +151,26 @@ export class ChatGPTBrowserClient {
         const encoder = new TextEncoder();
         const body = new ReadableStream<Uint8Array>({
             start: controller => {
-                void this.runResponse(request, threadId, responseId, controller, signal).catch(error => {
+                const key = threadId || this.defaultThread;
+                const previous = this.threadQueues.get(key) ?? Promise.resolve();
+                const task = previous.catch(() => undefined).then(() =>
+                    this.runResponse(request, key, responseId, controller, signal)
+                );
+                this.threadQueues.set(key, task);
+                void task.catch(error => {
                     if (signal?.aborted) {
-                        controller.close();
+                        try { controller.close(); } catch { /* stream already closed */ }
                         return;
                     }
                     const message = error instanceof Error ? error.message : String(error);
-                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "browser_error", message } })}\n\n`));
-                    controller.close();
+                    try {
+                        controller.enqueue(encoder.encode(`event: error\\ndata: ${JSON.stringify({ type: "error", error: { type: "browser_error", message } })}\\n\\n`));
+                        controller.close();
+                    } catch { /* consumer already cancelled the stream */ }
+                }).finally(() => {
+                    if (this.threadQueues.get(key) === task) this.threadQueues.delete(key);
                 });
-            },
+            },,
         });
         return { body, responseId };
     }
