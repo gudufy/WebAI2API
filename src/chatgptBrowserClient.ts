@@ -149,15 +149,21 @@ export class ChatGPTBrowserClient {
                 throw new Error(`Could not load ChatGPT within 25 seconds (url=${currentUrl}, title=${title}). Check the Edge window/network and retry.`);
             }
         }
-        console.log(`[ChatGPT Browser] Waiting for page DOM; url=${page.url()}`);
-        await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(error => {
-            console.warn(`[ChatGPT Browser] DOM load-state wait timed out; continuing; ${error instanceof Error ? error.message : String(error)}`);
-        });
+        // goto(domcontentloaded) above has already waited for the initial document.
+        // Do not wait for another load-state here: Cloudflare interstitials can keep
+        // the page in a navigation state and make the request look permanently hung.
         const currentUrl = page.url();
-        const title = await page.title().catch(() => "");
-        console.log(`[ChatGPT Browser] Checking login/page state; url=${currentUrl}; title=${title}`);
-        if (/challenge-platform|__cf_chl|cdn-cgi/i.test(currentUrl + " " + title)) {
-            throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification there, then retry.");
+        console.log(`[ChatGPT Browser] Checking initial URL before waiting for page state; url=${currentUrl}`);
+        if (/challenge-platform|__cf_chl|cdn-cgi/i.test(currentUrl)) {
+            throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification in the Edge window, then retry.");
+        }
+        const title = await Promise.race([
+            page.title().catch(() => ""),
+            new Promise<string>(resolve => setTimeout(() => resolve("(title lookup timed out)"), 3000)),
+        ]);
+        console.log(`[ChatGPT Browser] Checking login/page state; url=${page.url()}; title=${title}`);
+        if (/challenge-platform|__cf_chl|cdn-cgi/i.test(page.url() + " " + title)) {
+            throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification in the Edge window, then retry.");
         }
         const loginRequired = await page.locator('input[name="email"], input[type="password"]').count().catch(() => 0);
         if (loginRequired || /\/auth\/login|\/log-in/.test(currentUrl)) {
