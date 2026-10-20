@@ -138,7 +138,7 @@ export class ChatGPTBrowserClient {
                     hasComposer: Boolean(document.querySelector("#prompt-textarea, [contenteditable=\"true\"], textarea[placeholder]")),
                 }));
                 const challenge = /just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(title + " " + state.bodyText)
-                    || /\\/cdn-cgi\\/|challenge-platform/i.test(new URL(candidate.url()).pathname);
+                    || /\/cdn-cgi\/|challenge-platform/i.test(new URL(candidate.url()).pathname);
                 return !challenge && (state.hasComposer || state.bodyText.trim().length > 0);
             } catch { return false; }
         };
