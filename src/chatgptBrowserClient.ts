@@ -170,7 +170,7 @@ export class ChatGPTBrowserClient {
                 }).finally(() => {
                     if (this.threadQueues.get(key) === task) this.threadQueues.delete(key);
                 });
-            },,
+            },
         });
         return { body, responseId };
     }
