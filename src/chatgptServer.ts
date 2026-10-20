@@ -73,7 +73,10 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTBrowserClien
             return;
         }
 
-        console.log(`[Local WS] <- ${message.type || "unknown"}${message.model ? ` model=${message.model}` : ""}`);
+        const inputSummary = Array.isArray(message.input)
+            ? `input=${message.input.length}`
+            : `inputType=${typeof message.input}`;
+        console.log(`[Local WS] <- ${message.type || "unknown"}${message.model ? ` model=${message.model}` : ""} ${inputSummary} keys=${Object.keys(message).join(",")}`);
         if (message.type === "response.cancel" || message.type === "response.abort") {
             activeAbort?.abort();
             return;
