@@ -303,8 +303,18 @@ ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, rep
             ariaLabel: element.getAttribute("aria-label"),
             placeholder: element.getAttribute("placeholder"),
         })).catch(() => null);
-        console.log(`[ChatGPT Browser] Prompt editor found; metadata=${JSON.stringify(editorInfo)}; chars=${fullPrompt.length}. Filling editor (timeout 60s).`);
-        await editor.fill(fullPrompt, { timeout: 60000 });
+        console.log(`[ChatGPT Browser] Prompt editor found; metadata=${JSON.stringify(editorInfo)}; chars=${fullPrompt.length}. Filling editor in 8000-character chunks.`);
+        // A single fill() with a ~100k-character Codex prompt can stall the ChatGPT
+        // composer. Clear it first, then insert bounded chunks so progress is observable.
+        await editor.fill("", { timeout: 15000 });
+        await editor.click({ timeout: 10000 });
+        const chunkSize = 8000;
+        for (let offset = 0; offset < fullPrompt.length; offset += chunkSize) {
+            signal?.throwIfAborted();
+            const chunk = fullPrompt.slice(offset, offset + chunkSize);
+            console.log(`[ChatGPT Browser] Inserting prompt chunk ${Math.floor(offset / chunkSize) + 1}/${Math.ceil(fullPrompt.length / chunkSize)}; chars=${Math.min(offset + chunkSize, fullPrompt.length)}/${fullPrompt.length}.`);
+            await page.keyboard.insertText(chunk);
+        }
         console.log("[ChatGPT Browser] Prompt entered; submitting to ChatGPT.");
 
         const sendButton = page.locator(
