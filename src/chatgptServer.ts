@@ -97,6 +97,20 @@ async function handleWebSocketSession(ws: WebSocket, client: ChatGPTBrowserClien
                         threadId = value.trim();
                         break;
                     }
+                    // Codex may serialize thread metadata into x-codex-turn-metadata.
+                    const turnMetadata = metadata["x-codex-turn-metadata"];
+                    if (typeof turnMetadata === "string") {
+                        try {
+                            const parsed = JSON.parse(turnMetadata) as Record<string, unknown>;
+                            const nested = parsed.thread_id || parsed.threadId || parsed.session_id || parsed.sessionId;
+                            if (typeof nested === "string" && nested.trim()) {
+                                threadId = nested.trim();
+                                break;
+                            }
+                        } catch {
+                            // Ignore malformed optional metadata and use the default session.
+                        }
+                    }
                 }
                 const response = await client.createResponse(normalizeRequest(message), threadId, activeAbort.signal);
                 for await (const event of parseSseStream(response.body)) {
