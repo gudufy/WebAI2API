@@ -184,6 +184,7 @@ export class ChatGPTBrowserClient {
     ): Promise<void> {
         let sequenceNumber = 0;
         const send = (event: ResponseEvent) => controller.enqueue(sse({ ...event, sequence_number: sequenceNumber++ }));
+        signal?.throwIfAborted();
         const now = Math.floor(Date.now() / 1000);
         if (request.generate === false || !Array.isArray(request.input) || request.input.length === 0) {
             send({ type: "response.created", response: { id: responseId, object: "response", created_at: now, status: "in_progress", model: request.model, output: [] } });
@@ -200,7 +201,9 @@ export class ChatGPTBrowserClient {
         }
         const outputItemId = id("msg");
         const outputTextId = id("part");
-        const tools = Array.isArray(request.tools) ? request.tools.filter((t: any) => t && (t.type === "function" || t.name)) : [];
+        const tools = request.tool_choice === "none"
+            ? []
+            : Array.isArray(request.tools) ? request.tools.filter((t: any) => t && (t.type === "function" || t.name)) : [];
         let prompt = inputToPrompt(Array.isArray(request.input) ? request.input : []);
         const instructions = typeof request.instructions === "string" ? request.instructions : "";
         if (tools.length) {
@@ -271,12 +274,13 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
         const functionCall = tools.length ? extractFunctionCall(previous) : undefined;
         let output: Record<string, unknown>[];
         if (functionCall && tools.some((tool: any) => tool.name === functionCall.name || tool.function?.name === functionCall.name)) {
+            const itemId = id("fc");
             const callId = id("call");
-            const item = { id: callId, call_id: callId, type: "function_call", name: functionCall.name, arguments: JSON.stringify(functionCall.arguments), status: "completed" };
+            const item = { id: itemId, call_id: callId, type: "function_call", name: functionCall.name, arguments: JSON.stringify(functionCall.arguments), status: "completed" };
             send({ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress" } });
             if (item.arguments) {
-                send({ type: "response.function_call_arguments.delta", item_id: callId, output_index: 0, delta: item.arguments });
-                send({ type: "response.function_call_arguments.done", item_id: callId, output_index: 0, arguments: item.arguments });
+                send({ type: "response.function_call_arguments.delta", item_id: itemId, output_index: 0, delta: item.arguments });
+                send({ type: "response.function_call_arguments.done", item_id: itemId, output_index: 0, arguments: item.arguments });
             }
             send({ type: "response.output_item.done", output_index: 0, item });
             output = [item];
