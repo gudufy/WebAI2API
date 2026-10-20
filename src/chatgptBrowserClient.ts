@@ -130,14 +130,37 @@ export class ChatGPTBrowserClient {
         const context = this.context!;
         // Keep the user's manually open ChatGPT tab untouched. Each Codex thread gets
         // its own new tab while sharing the authenticated CDP browser context/cookies.
+        console.log(`[ChatGPT Browser] Creating browser tab for thread ${key}.`);
         page = await context.newPage();
         this.pages.set(key, page);
+        console.log(`[ChatGPT Browser] Browser tab created; initialUrl=${page.url() || "(empty)"}.`);
         if (!page.url().includes("chatgpt.com")) {
-            await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60000 });
+            console.log("[ChatGPT Browser] Navigating to https://chatgpt.com/ (timeout 25s).");
+            try {
+                await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 25000 });
+                console.log(`[ChatGPT Browser] Navigation finished; url=${page.url()}`);
+            } catch (error) {
+                const currentUrl = page.url();
+                const title = await page.title().catch(() => "");
+                console.error(`[ChatGPT Browser] Navigation did not finish; url=${currentUrl}; title=${title}; error=${error instanceof Error ? error.message : String(error)}`);
+                if (/challenge-platform|__cf_chl|cdn-cgi/i.test(currentUrl + " " + title)) {
+                    throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification there, then retry.");
+                }
+                throw new Error(`Could not load ChatGPT within 25 seconds (url=${currentUrl}, title=${title}). Check the Edge window/network and retry.`);
+            }
         }
-        await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => undefined);
+        console.log(`[ChatGPT Browser] Waiting for page DOM; url=${page.url()}`);
+        await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(error => {
+            console.warn(`[ChatGPT Browser] DOM load-state wait timed out; continuing; ${error instanceof Error ? error.message : String(error)}`);
+        });
+        const currentUrl = page.url();
+        const title = await page.title().catch(() => "");
+        console.log(`[ChatGPT Browser] Checking login/page state; url=${currentUrl}; title=${title}`);
+        if (/challenge-platform|__cf_chl|cdn-cgi/i.test(currentUrl + " " + title)) {
+            throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification there, then retry.");
+        }
         const loginRequired = await page.locator('input[name="email"], input[type="password"]').count().catch(() => 0);
-        if (loginRequired || /\/auth\/login|\/log-in/.test(page.url())) {
+        if (loginRequired || /\\/auth\\/login|\\/log-in/.test(currentUrl)) {
             throw new Error("ChatGPT is not logged in in the connected browser. Log in to chatgpt.com and retry.");
         }
         return page;
