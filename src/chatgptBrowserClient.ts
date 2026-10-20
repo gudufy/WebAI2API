@@ -128,12 +128,19 @@ export class ChatGPTBrowserClient {
         let page = this.pages.get(key);
         if (page && !page.isClosed()) return page;
         const context = this.context!;
-        // Keep the user's manually open ChatGPT tab untouched. Each Codex thread gets
-        // its own new tab while sharing the authenticated CDP browser context/cookies.
-        console.log(`[ChatGPT Browser] Creating browser tab for thread ${key}.`);
-        page = await context.newPage();
+        // Prefer an already-open ChatGPT tab: the user has confirmed that manual
+        // browsing works, while a fresh tab is repeatedly challenged by Cloudflare.
+        // Reusing the existing tab also preserves its live page/session state rather
+        // than relying only on shared cookies. If no ChatGPT tab exists, create one.
+        page = context.pages().find(candidate => !candidate.isClosed() && /(^|\.)chatgpt\.com$/i.test(new URL(candidate.url()).hostname));
+        if (page) {
+            console.log(`[ChatGPT Browser] Reusing existing ChatGPT tab for thread ${key}; url=${page.url()}.`);
+        } else {
+            console.log(`[ChatGPT Browser] No existing ChatGPT tab found; creating browser tab for thread ${key}.`);
+            page = await context.newPage();
+            console.log(`[ChatGPT Browser] Browser tab created; initialUrl=${page.url() || "(empty)"}.`);
+        }
         this.pages.set(key, page);
-        console.log(`[ChatGPT Browser] Browser tab created; initialUrl=${page.url() || "(empty)"}.`);
         if (!page.url().includes("chatgpt.com")) {
             console.log("[ChatGPT Browser] Navigating to https://chatgpt.com/ (timeout 25s).");
             try {
