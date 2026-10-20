@@ -201,7 +201,6 @@ export class ChatGPTBrowserClient {
             return;
         }
         const outputItemId = id("msg");
-        const outputTextId = id("part");
         const tools = request.tool_choice === "none"
             ? []
             : Array.isArray(request.tools) ? request.tools.filter((t: any) => t && (t.type === "function" || t.name)) : [];
@@ -301,7 +300,7 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
             const itemId = id("fc");
             const callId = id("call");
             const item = { id: itemId, call_id: callId, type: "function_call", name: functionCall.name, arguments: JSON.stringify(functionCall.arguments), status: "completed" };
-            send({ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress" } });
+            send({ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", arguments: "" } });
             if (item.arguments) {
                 send({ type: "response.function_call_arguments.delta", item_id: itemId, output_index: 0, delta: item.arguments });
                 send({ type: "response.function_call_arguments.done", item_id: itemId, output_index: 0, arguments: item.arguments });
