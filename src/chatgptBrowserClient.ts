@@ -230,15 +230,23 @@ export class ChatGPTBrowserClient {
         let prompt = inputToPrompt(incrementalInput.length ? incrementalInput : input);
         const instructions = typeof request.instructions === "string" ? request.instructions : "";
         if (tools.length) {
+            const choice = request.tool_choice;
+            const forcedName = choice && typeof choice === "object"
+                ? String((choice as Record<string, unknown>).name
+                    ?? ((choice as Record<string, unknown>).function as Record<string, unknown> | undefined)?.name
+                    ?? "")
+                : "";
+            const mustCallTool = choice === "required" || Boolean(forcedName);
             prompt += `
 
 IMPORTANT TOOL-CALL PROTOCOL:
 The caller has these tools:
 ${JSON.stringify(tools)}
-If you need to call one, do not claim to execute it. Reply with ONLY a JSON object in this exact shape:
+${mustCallTool ? `A tool call is required${forcedName ? ` and you must call "${forcedName}"` : ""}. Do not answer in natural language instead.` : "If you need to call one, do not claim to execute it."}
+Reply with ONLY a JSON object in this exact shape:
 {"tool_call":{"name":"EXACT_TOOL_NAME","arguments":{}}}
 Use the tool's declared JSON schema. Do not wrap it in markdown.
-If no tool is needed, reply normally. Do not produce a tool_call unless calling a listed tool.`;
+${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, reply normally. Do not produce a tool_call unless calling a listed tool."}`;
         }
         const fullPrompt = [instructions, prompt].filter(Boolean).join("\n\n");
         const page = await this.pageFor(threadId);
