@@ -295,8 +295,16 @@ ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, rep
             'div.ProseMirror[contenteditable="true"], ' +
             '[role="textbox"][contenteditable="true"]'
         ).last();
-        await editor.waitFor({ state: "visible", timeout: 30000 });
-        await editor.fill(fullPrompt);
+        console.log("[ChatGPT Browser] Locating visible prompt editor.");
+        await editor.waitFor({ state: "visible", timeout: 20000 });
+        const editorInfo = await editor.evaluate(element => ({
+            tag: element.tagName,
+            role: element.getAttribute("role"),
+            ariaLabel: element.getAttribute("aria-label"),
+            placeholder: element.getAttribute("placeholder"),
+        })).catch(() => null);
+        console.log(`[ChatGPT Browser] Prompt editor found; metadata=${JSON.stringify(editorInfo)}; chars=${fullPrompt.length}. Filling editor (timeout 60s).`);
+        await editor.fill(fullPrompt, { timeout: 60000 });
         console.log("[ChatGPT Browser] Prompt entered; submitting to ChatGPT.");
 
         const sendButton = page.locator(
