@@ -164,7 +164,7 @@ export class ChatGPTBrowserClient {
                     }
                     const message = error instanceof Error ? error.message : String(error);
                     try {
-                        controller.enqueue(encoder.encode(`event: error\\ndata: ${JSON.stringify({ type: "error", error: { type: "browser_error", message } })}\\n\\n`));
+                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "browser_error", message } })}\n\n`));
                         controller.close();
                     } catch { /* consumer already cancelled the stream */ }
                 }).finally(() => {
