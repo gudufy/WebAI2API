@@ -206,7 +206,7 @@ export class ChatGPTBrowserClient {
             ? []
             : Array.isArray(request.tools) ? request.tools.filter((t: any) => t && (t.type === "function" || t.name)) : [];
         const input = Array.isArray(request.input) ? request.input : [];
-        const inputSignatures = input.map(item => JSON.stringify(item));
+        const inputSignatures = input.map(item => JSON.stringify(item) ?? String(item));
         const sessionKey = threadId || this.defaultThread;
         const previousInput = this.inputSnapshots.get(sessionKey);
         let incrementalInput = input;
