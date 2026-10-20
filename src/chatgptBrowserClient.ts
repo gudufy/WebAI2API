@@ -200,6 +200,7 @@ export class ChatGPTBrowserClient {
             controller.close();
             return;
         }
+        console.log(`[ChatGPT Browser] Starting response ${responseId}; thread=${threadId}; input=${Array.isArray(request.input) ? request.input.length : 0}`);
         const outputItemId = id("msg");
         const tools = request.tool_choice === "none"
             ? []
@@ -249,7 +250,9 @@ Use the tool's declared JSON schema. Do not wrap it in markdown.
 ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, reply normally. Do not produce a tool_call unless calling a listed tool."}`;
         }
         const fullPrompt = [instructions, prompt].filter(Boolean).join("\n\n");
+        console.log(`[ChatGPT Browser] Opening/reusing browser tab for thread ${threadId}; promptChars=${fullPrompt.length}`);
         const page = await this.pageFor(threadId);
+        console.log(`[ChatGPT Browser] ChatGPT page ready: ${page.url()}`);
         signal?.throwIfAborted();
         const stopOnAbort = () => {
             void page.locator('button[data-testid="stop-button"], button[aria-label*="Stop generating"]').last()
@@ -259,15 +262,32 @@ ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, rep
 
         const messageSelector = 'main [data-message-author-role="assistant"]';
         const before = await page.locator(messageSelector).count().catch(() => 0);
-        const editor = page.locator('#prompt-textarea, textarea[placeholder], [contenteditable="true"][data-placeholder]').last();
+        // ChatGPT has used several editor DOMs, including a ProseMirror textbox with
+        // a localized aria-label (e.g. "询问 ChatGPT"). Include these selectors rather
+        // than waiting forever on the older #prompt-textarea/data-placeholder DOM.
+        const editor = page.locator(
+            '#prompt-textarea, textarea[placeholder], ' +
+            '[contenteditable="true"][data-placeholder], ' +
+            '[contenteditable="true"][aria-label], ' +
+            'div.ProseMirror[contenteditable="true"], ' +
+            '[role="textbox"][contenteditable="true"]'
+        ).last();
         await editor.waitFor({ state: "visible", timeout: 30000 });
-        const tag = await editor.evaluate(el => el.tagName.toLowerCase());
-        if (tag === "textarea" || tag === "input") await editor.fill(fullPrompt);
-        else await editor.fill(fullPrompt);
+        await editor.fill(fullPrompt);
+        console.log("[ChatGPT Browser] Prompt entered; submitting to ChatGPT.");
 
-        const sendButton = page.locator('button[data-testid="send-button"], button[aria-label*="Send prompt"], button[aria-label="Send"]').last();
-        await sendButton.waitFor({ state: "visible", timeout: 15000 });
-        await sendButton.click();
+        const sendButton = page.locator(
+            'button[data-testid="send-button"], ' +
+            'button[aria-label*="Send prompt" i], button[aria-label="Send" i], ' +
+            'button[aria-label*="发送" i]'
+        ).last();
+        if (await sendButton.isVisible().catch(() => false)) {
+            await sendButton.click();
+        } else {
+            // Fallback for localized/changed ChatGPT buttons.
+            await editor.press("Enter");
+        }
+        console.log("[ChatGPT Browser] Prompt submitted; waiting for assistant response.");
 
         send({ type: "response.created", sequence_number: 0, response: { id: responseId, object: "response", created_at: now, status: "in_progress", model: request.model, output: [] } });
         if (!tools.length) {
@@ -300,6 +320,7 @@ ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, rep
             await new Promise(resolve => setTimeout(resolve, 180));
         }
         if (!sawNewAssistant) throw new Error("No assistant response appeared in ChatGPT within 5 minutes.");
+        console.log(`[ChatGPT Browser] Assistant response captured; chars=${previous.length}`);
         if (Date.now() >= deadline) throw new Error("Timed out waiting for ChatGPT to finish generating a response.");
 
         const functionCall = tools.length ? extractFunctionCall(previous) : undefined;
