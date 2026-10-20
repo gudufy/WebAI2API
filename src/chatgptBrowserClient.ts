@@ -154,15 +154,25 @@ export class ChatGPTBrowserClient {
         // the page in a navigation state and make the request look permanently hung.
         const currentUrl = page.url();
         console.log(`[ChatGPT Browser] Checking initial URL before waiting for page state; url=${currentUrl}`);
-        if (/challenge-platform|__cf_chl|cdn-cgi/i.test(currentUrl)) {
-            throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification in the Edge window, then retry.");
-        }
+        // Cloudflare may append __cf_chl_rt_tk to the URL even after redirecting
+        // to the real app. Do not treat that query parameter alone as proof of a
+        // challenge; inspect the document title/body and challenge-specific paths.
+        const challengePath = /\/cdn-cgi\/|challenge-platform/i.test(new URL(currentUrl).pathname);
+        console.log(`[ChatGPT Browser] Initial challenge-path check complete; challengePath=${challengePath}`);
         const title = await Promise.race([
             page.title().catch(() => ""),
             new Promise<string>(resolve => setTimeout(() => resolve("(title lookup timed out)"), 3000)),
         ]);
-        console.log(`[ChatGPT Browser] Checking login/page state; url=${page.url()}; title=${title}`);
-        if (/challenge-platform|__cf_chl|cdn-cgi/i.test(page.url() + " " + title)) {
+        const pageState = await Promise.race([
+            page.evaluate(() => ({
+                bodyText: (document.body?.innerText || "").slice(0, 1000),
+                readyState: document.readyState,
+            })).catch(error => ({ bodyText: `(page inspection failed: ${String(error)} )`, readyState: "unknown" })),
+            new Promise<{ bodyText: string; readyState: string }>(resolve =>
+                setTimeout(() => resolve({ bodyText: "(page inspection timed out)", readyState: "unknown" }), 3000)),
+        ]);
+        console.log(`[ChatGPT Browser] Page state inspected; url=${page.url()}; title=${title}; readyState=${pageState.readyState}; bodyPreview=${JSON.stringify(pageState.bodyText.slice(0, 300))}`);
+        if (challengePath || /just a moment|verify you are human|checking your browser|cloudflare/i.test(title + " " + pageState.bodyText)) {
             throw new Error("ChatGPT is showing a Cloudflare verification page in the WebAI2API Edge window. Complete the verification in the Edge window, then retry.");
         }
         const loginRequired = await page.locator('input[name="email"], input[type="password"]').count().catch(() => 0);
