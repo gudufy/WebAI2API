@@ -103,6 +103,7 @@ export class ChatGPTBrowserClient {
     private context?: BrowserContext;
     private readonly pages = new Map<string, Page>();
     private readonly threadQueues = new Map<string, Promise<void>>();
+    private readonly inputSnapshots = new Map<string, string[]>();
     private defaultThread = "default";
 
     constructor(private readonly cdpUrl = process.env.CHATGPT_CDP_URL || "http://127.0.0.1:9222") {}
@@ -204,7 +205,30 @@ export class ChatGPTBrowserClient {
         const tools = request.tool_choice === "none"
             ? []
             : Array.isArray(request.tools) ? request.tools.filter((t: any) => t && (t.type === "function" || t.name)) : [];
-        let prompt = inputToPrompt(Array.isArray(request.input) ? request.input : []);
+        const input = Array.isArray(request.input) ? request.input : [];
+        const inputSignatures = input.map(item => JSON.stringify(item));
+        const sessionKey = threadId || this.defaultThread;
+        const previousInput = this.inputSnapshots.get(sessionKey);
+        let incrementalInput = input;
+        if (previousInput?.length) {
+            let commonPrefix = 0;
+            while (commonPrefix < previousInput.length
+                && commonPrefix < inputSignatures.length
+                && previousInput[commonPrefix] === inputSignatures[commonPrefix]) {
+                commonPrefix += 1;
+            }
+            if (commonPrefix > 0) {
+                incrementalInput = input.slice(commonPrefix);
+            } else {
+                const lastKnown = previousInput[previousInput.length - 1];
+                const lastKnownIndex = inputSignatures.lastIndexOf(lastKnown);
+                if (lastKnownIndex >= 0) incrementalInput = input.slice(lastKnownIndex + 1);
+            }
+        }
+        // The browser already retains earlier turns. Send only the newly appended
+        // Responses input when the caller supplies full history, to avoid replaying
+        // the original user prompt after a function_call_output.
+        let prompt = inputToPrompt(incrementalInput.length ? incrementalInput : input);
         const instructions = typeof request.instructions === "string" ? request.instructions : "";
         if (tools.length) {
             prompt += `
@@ -308,6 +332,7 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
                 usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
             },
         });
+        this.inputSnapshots.set(sessionKey, inputSignatures);
         signal?.removeEventListener("abort", stopOnAbort);
         controller.close();
     }
@@ -316,6 +341,7 @@ If no tool is needed, reply normally. Do not produce a tool_call unless calling 
         // Do not close the user's browser. Only detach this CDP client.
         this.pages.clear();
         this.threadQueues.clear();
+        this.inputSnapshots.clear();
         await this.browser?.close();
         this.browser = undefined;
         this.context = undefined;
