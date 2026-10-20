@@ -193,8 +193,21 @@ export class ChatGPTBrowserClient {
             const pageState = await page.evaluate(() => ({
                 bodyText: (document.body?.innerText || "").slice(0, 1000),
                 readyState: document.readyState,
-            })).catch(error => ({ bodyText: `(page inspection failed: ${String(error)})`, readyState: "unknown" }));
-            const challenge = challengePath || /just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(title + " " + pageState.bodyText);
+                hasComposer: Boolean(document.querySelector('#prompt-textarea, textarea[placeholder], [contenteditable="true"], [role="textbox"]')),
+            })).then(state => ({ ...state, inspectionFailed: false }))
+                .catch(error => ({
+                    bodyText: "",
+                    readyState: "unknown",
+                    hasComposer: false,
+                    inspectionFailed: true,
+                    inspectionError: String(error),
+                }));
+            // A destroyed execution context usually means Cloudflare is navigating.
+            // Never treat that transient inspection failure as a cleared challenge.
+            const challenge = challengePath
+                || pageState.inspectionFailed
+                || (!pageState.bodyText.trim() && !pageState.hasComposer)
+                || /just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(title + " " + pageState.bodyText);
             return { url, title, pageState, challenge };
         };
         let inspected = await inspectPage();
@@ -207,18 +220,19 @@ export class ChatGPTBrowserClient {
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 inspected = await inspectPage();
                 currentUrl = inspected.url;
-                if (!inspected.challenge && inspected.pageState.bodyText.trim()) {
-                    console.log(`[ChatGPT Browser] Challenge cleared; url=${inspected.url}; title=${inspected.title}; readyState=${inspected.pageState.readyState}; bodyPreview=${JSON.stringify(inspected.pageState.bodyText.slice(0, 200))}`);
+                if (inspected.pageState.hasComposer && !inspected.challenge) {
+                    console.log(`[ChatGPT Browser] ChatGPT composer is available after verification; url=${inspected.url}; title=${inspected.title}; readyState=${inspected.pageState.readyState}`);
                     break;
                 }
                 const elapsed = Math.floor((Date.now() - (deadline - 90000)) / 1000);
                 if (elapsed - lastProgress >= 10) {
                     lastProgress = elapsed;
-                    console.log(`[ChatGPT Browser] Still waiting for Cloudflare challenge (${elapsed}/90s); url=${inspected.url}; title=${inspected.title}; bodyChars=${inspected.pageState.bodyText.length}`);
+                    const status = inspected.challenge ? "Cloudflare challenge/navigation" : "ChatGPT page loading";
+                    console.log(`[ChatGPT Browser] Still waiting for ${status} (${elapsed}/90s); url=${inspected.url}; title=${inspected.title}; bodyChars=${inspected.pageState.bodyText.length}; composer=${inspected.pageState.hasComposer}; inspectionFailed=${inspected.pageState.inspectionFailed}`);
                 }
             }
-            if (inspected.challenge || !inspected.pageState.bodyText.trim()) {
-                throw new Error("ChatGPT remained on the Cloudflare “请稍候…” page for 90 seconds (title=" + inspected.title + ", bodyChars=" + inspected.pageState.bodyText.length + "). This is a browser/network verification issue, not a prompt-editor selector issue. Open the WebAI2API Edge window and check whether the page can finish loading manually.");
+            if (!inspected.pageState.hasComposer || inspected.challenge) {
+                throw new Error("ChatGPT did not expose a usable prompt composer within 90 seconds (title=" + inspected.title + ", bodyChars=" + inspected.pageState.bodyText.length + ", inspectionFailed=" + inspected.pageState.inspectionFailed + "). The page may still be navigating after Cloudflare verification. Check the WebAI2API Edge tab and retry once ChatGPT has fully loaded.");
             }
         }
         const loginRequired = await page.locator('input[name="email"], input[type="password"]').count().catch(() => 0);
