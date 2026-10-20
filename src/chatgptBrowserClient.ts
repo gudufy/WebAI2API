@@ -315,9 +315,36 @@ ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, rep
             '[role="textbox"][contenteditable="true"]:visible'
         ).last();
         console.log("[ChatGPT Browser] Locating visible prompt editor.");
-        try {
-            await editor.waitFor({ state: "visible", timeout: 12000 });
-        } catch (error) {
+        // Cloudflare can render its localized "请稍候…" interstitial after the
+        // initial document inspection. Keep checking for up to 60 seconds so a
+        // user can complete any visible verification in the Edge window, rather
+        // than failing after the old 12-second editor-only wait.
+        const editorDeadline = Date.now() + 60000;
+        let editorFound = false;
+        let challengeNoticeLogged = false;
+        while (Date.now() < editorDeadline) {
+            try {
+                await editor.waitFor({ state: "visible", timeout: 2000 });
+                editorFound = true;
+                break;
+            } catch {
+                const state = await page.evaluate(() => ({
+                    title: document.title || "",
+                    bodyText: (document.body?.innerText || "").slice(0, 500),
+                    url: location.href,
+                })).catch(() => ({ title: "", bodyText: "", url: page.url() }));
+                if (/just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(state.title + " " + state.bodyText)) {
+                    if (!challengeNoticeLogged) {
+                        console.warn("[ChatGPT Browser] Cloudflare verification/wait page detected. Complete it in the opened Edge tab; waiting up to 60 seconds for the prompt editor.");
+                        challengeNoticeLogged = true;
+                    }
+                } else if (challengeNoticeLogged) {
+                    console.log("[ChatGPT Browser] Verification page no longer detected; continuing to wait for the prompt editor.");
+                    challengeNoticeLogged = false;
+                }
+            }
+        }
+        if (!editorFound) {
             const diagnostics = await page.evaluate(() => {
                 const selectors = [
                     '#prompt-textarea', 'textarea[placeholder]',
@@ -342,8 +369,11 @@ ${mustCallTool ? "You must return a tool_call now." : "If no tool is needed, rep
                     })),
                 };
             }).catch(() => ({ url: page.url(), title: "(diagnostics unavailable)" }));
-            console.error(`[ChatGPT Browser] Prompt editor not found within 12 seconds; diagnostics=${JSON.stringify(diagnostics)}`);
-            throw new Error(`Could not find a visible ChatGPT prompt editor. Check that ChatGPT finished loading and is logged in. Page: ${page.url()}`);
+            console.error(`[ChatGPT Browser] Prompt editor not found within 60 seconds; diagnostics=${JSON.stringify(diagnostics)}`);
+            if (/just a moment|verify you are human|checking your browser|cloudflare|请稍候|正在检查您的浏览器|验证您是人类/i.test(String((diagnostics as any).title || "") + " " + String((diagnostics as any).bodyText || ""))) {
+                throw new Error("ChatGPT is still showing a Cloudflare verification/wait page. Complete the verification in the opened Edge tab, then retry.");
+            }
+            throw new Error(`Could not find a visible ChatGPT prompt editor after 60 seconds. Check that ChatGPT finished loading and is logged in. Page: ${page.url()}`);
         }
         const editorInfo = await editor.evaluate(element => ({
             tag: element.tagName,
